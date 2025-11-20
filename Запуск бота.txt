@@ -1,0 +1,19 @@
+https://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@github.com/BADGARizer/mgreg-bot.git
+
+5TGRgkYsE4BTQ9XW5WPR
+
+
+cd /home/dev_bot
+⚠️ Удалит всё внутри текущей папки.
+
+sudo rm -rf /home/dev_bot/mgreg-bot
+
+Теперь снова клонируешь:
+
+sudo git clone https://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@github.com/BADGARizer/mgreg-bot.git
+
+cd /home/dev_bot/mgreg-bot
+
+sudo docker compose up -d --build
+
+docker compose logs -f bot
