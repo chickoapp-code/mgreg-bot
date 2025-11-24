@@ -21,10 +21,49 @@ class Settings(BaseSettings):
     admin_chat_id: Optional[int] = Field(default=None, alias="ADMIN_CHAT_ID")
     planfix_template_id: int = Field(default=413, alias="PLANFIX_TEMPLATE_ID")
 
+    # Webhook secrets
+    planfix_webhook_secret: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_SECRET")
+    webapp_hmac_secret: str = Field(alias="WEBAPP_HMAC_SECRET")
+    yforms_webhook_secret: str = Field(alias="YFORMS_WEBHOOK_SECRET")
+
+    # Planfix task configuration
+    planfix_task_template_ids: Optional[str] = Field(default=None, alias="PLANFIX_TASK_TEMPLATE_IDS")
+    status_done_id: Optional[int] = Field(default=None, alias="STATUS_DONE_ID")
+    status_cancelled_id: Optional[int] = Field(default=None, alias="STATUS_CANCELLED_ID")
+    result_field_id: Optional[int] = Field(default=None, alias="RESULT_FIELD_ID")
+    result_files_field_id: Optional[int] = Field(default=None, alias="RESULT_FILES_FIELD_ID")
+
+    # Server configuration
+    webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
+    webhook_port: int = Field(default=8000, alias="WEBHOOK_PORT")
+    webhook_base_url: Optional[str] = Field(default=None, alias="WEBHOOK_BASE_URL")
+
+    # Database
+    database_path: str = Field(default="bot.db", alias="DATABASE_PATH")
+
+    # Form URLs (comma-separated: resto_a,resto_b,resto_c,delivery_a,delivery_b,delivery_c)
+    form_urls: Optional[str] = Field(default=None, alias="FORM_URLS")
+
     model_config = {
         "populate_by_name": True,
         "extra": "ignore",
     }
+
+    @property
+    def task_template_ids_list(self) -> list[int]:
+        """Parse task template IDs from comma-separated string."""
+        if not self.planfix_task_template_ids:
+            return []
+        return [int(x.strip()) for x in self.planfix_task_template_ids.split(",") if x.strip()]
+
+    @property
+    def form_urls_dict(self) -> dict[str, str]:
+        """Parse form URLs from comma-separated string."""
+        if not self.form_urls:
+            return {}
+        urls = [x.strip() for x in self.form_urls.split(",") if x.strip()]
+        form_names = ["resto_a", "resto_b", "resto_c", "delivery_a", "delivery_b", "delivery_c"]
+        return dict(zip(form_names, urls))
 
 
 @lru_cache

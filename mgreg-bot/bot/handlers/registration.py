@@ -361,6 +361,22 @@ async def _create_contact(
     if contact_id:
         logger.info("planfix_contact_created", contact_id=contact_id)
 
+        # Save telegram mapping
+        from bot.database import get_database
+
+        db = get_database()
+        telegram_id = contact_data.telegram_id
+        telegram_username = contact_data.telegram_username
+        if telegram_id:
+            await db.execute(
+                """
+                INSERT OR REPLACE INTO guest_telegram_map 
+                (planfix_contact_id, telegram_id, username, updated_at)
+                VALUES (?, ?, ?, datetime('now'))
+                """,
+                (int(contact_id), telegram_id, telegram_username),
+            )
+
         admin_chat_id = bot_data.get("admin_chat_id")
         admin_name = bot_data.get("admin_name")
         planfix_base_url = bot_data.get("planfix_base_url")
