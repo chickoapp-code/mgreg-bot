@@ -124,3 +124,6 @@ def get_database(db_path: str = "bot.db") -> Database:
         _db = Database(db_path)
     return _db
 
+
+
+
