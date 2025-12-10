@@ -38,7 +38,8 @@ cp env.example .env
 
 #### Опциональные переменные:
 
-- `PLANFIX_WEBHOOK_SECRET` - секрет для вебхуков Planfix (если используется)
+- `PLANFIX_WEBHOOK_LOGIN` - логин для Basic Auth вебхуков Planfix
+- `PLANFIX_WEBHOOK_PASSWORD` - пароль для Basic Auth вебхуков Planfix
 - `PLANFIX_TASK_TEMPLATE_IDS` - ID шаблонов задач через запятую
 - `STATUS_DONE_ID` - ID статуса "Завершена"
 - `STATUS_CANCELLED_ID` - ID статуса "Отменена"
@@ -49,10 +50,13 @@ cp env.example .env
 ### 3. Настройка Planfix
 
 1. **Создайте вебхук в Planfix:**
-   - URL: `https://your-domain.com/webhooks/planfix`
+   - URL: `http://crmbot.restme.pro/webhooks/planfix-guest`
    - Метод: POST
    - События: `task.created`, `task.updated`
-   - Подпись: включите и укажите `PLANFIX_WEBHOOK_SECRET`
+   - Аутентификация: Basic Auth (логин и пароль)
+   - Укажите логин и пароль в `.env` файле:
+     - `PLANFIX_WEBHOOK_LOGIN` - логин для вебхука
+     - `PLANFIX_WEBHOOK_PASSWORD` - пароль для вебхука
 
 2. **Настройте шаблон задачи "Проверка ресторана":**
    - Убедитесь, что шаблон имеет необходимые поля
@@ -69,7 +73,7 @@ cp env.example .env
 ### 4. Настройка Яндекс Форм
 
 1. **Настройте вебхуки в каждой форме:**
-   - URL: `https://your-domain.com/webhooks/yforms`
+   - URL: `http://crmbot.restme.pro/webhooks/yforms`
    - Метод: POST
    - Подпись: используйте `YFORMS_WEBHOOK_SECRET`
 
@@ -144,8 +148,9 @@ python -m bot.main
 
 ## API Endpoints
 
-### POST /webhooks/planfix
-Принимает события из Planfix при создании/обновлении задач.
+### POST /webhooks/planfix-guest
+Принимает события из Planfix при создании/обновлении задач для автоматизации приглашений тайных гостей.
+Требует Basic Auth аутентификации (логин/пароль).
 
 ### GET /webapp/start
 WebApp для отображения информации о задаче и редиректа на форму.
@@ -180,15 +185,18 @@ SQLite база данных (`bot.db` по умолчанию) содержит
 
 ## Безопасность
 
-- Все вебхуки проверяются по HMAC подписи
+- Вебхуки Planfix защищены Basic Auth (логин/пароль)
+- Вебхуки Яндекс Форм проверяются по HMAC подписи
 - WebApp URLs подписываются для предотвращения подделки
-- Секреты хранятся только в переменных окружения
+- Секреты и пароли хранятся только в переменных окружения
 - Идемпотентность обработки вебхуков (защита от дублей)
 
 ## Troubleshooting
 
 ### Приглашения не отправляются
 - Проверьте, что вебхук из Planfix настроен правильно
+- Убедитесь, что в настройках вебхука указаны правильные логин и пароль (Basic Auth)
+- Проверьте логи на наличие ошибок аутентификации (401)
 - Убедитесь, что в задаче указаны приглашенные гости
 - Проверьте, что у гостей есть связь `planfix_contact_id ↔ telegram_id`
 

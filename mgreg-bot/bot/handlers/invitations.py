@@ -97,7 +97,7 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
             )
 
             # Send success message with WebApp button
-            webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings)
+            webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings, client=client)
             if webapp_url:
                 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
 
@@ -121,7 +121,13 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 )
 
             # Withdraw all invitations for this task
-            await withdraw_all_invitations(task_id, callback.message.chat.id, callback.message.message_id, db)
+            await withdraw_all_invitations(
+                task_id,
+                callback.message.chat.id,
+                callback.message.message_id,
+                db,
+                bot_instance=callback.bot,
+            )
 
         except PlanfixError as e:
             logger.error("planfix_executor_assignment_failed", task_id=task_id, error=str(e))
@@ -206,6 +212,7 @@ async def withdraw_all_invitations(
     exclude_chat_id: int,
     exclude_message_id: int,
     db,
+    bot_instance=None,
 ) -> None:
     """Withdraw all invitations for task except the accepted one."""
     # Get all invitation messages
@@ -229,8 +236,13 @@ async def withdraw_all_invitations(
         (datetime.now().isoformat(), task_id, exclude_chat_id, exclude_message_id),
     )
 
-    # Note: Actual message deletion would require bot instance
-    # This is handled separately if needed
+    # Delete invitation messages
+    if bot_instance:
+        for inv in invitations:
+            try:
+                await bot_instance.delete_message(inv["chat_id"], inv["message_id"])
+            except Exception as e:
+                logger.warning("invitation_message_delete_failed", chat_id=inv["chat_id"], message_id=inv["message_id"], error=str(e))
 
 
 def generate_webapp_signature(params: dict[str, str], secret: str) -> str:
@@ -244,13 +256,25 @@ def generate_webapp_signature(params: dict[str, str], secret: str) -> str:
     ).hexdigest()
 
 
-async def generate_webapp_url(task_id: int, guest_id: int, settings) -> str | None:
+async def generate_webapp_url(task_id: int, guest_id: int, settings, client: PlanfixClient = None) -> str | None:
     """Generate WebApp URL with signature."""
     if not settings or not hasattr(settings, "webhook_base_url"):
         return None
 
     base_url = settings.webhook_base_url or "http://localhost:8000"
-    form = "resto_a"  # Default form, can be determined from task
+    
+    # Determine form type from task (default to resto_a)
+    form = "resto_a"
+    if client:
+        try:
+            task = await client.get_task(task_id, fields="id,name,description,customFieldData")
+            # Check custom fields or task name to determine form type
+            task_name = task.get("name", "").lower()
+            if "доставка" in task_name or "delivery" in task_name:
+                form = "delivery_a"  # Default delivery form
+            # Could also check custom fields for form type
+        except Exception as e:
+            logger.warning("form_type_determination_failed", task_id=task_id, error=str(e))
 
     params = {
         "taskId": str(task_id),

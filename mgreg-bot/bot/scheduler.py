@@ -45,11 +45,17 @@ async def check_task_deadline(task_id: int, client: PlanfixClient) -> None:
             )
             logger.info("task_deadline_cancelled", task_id=task_id)
 
-            # Notify admin
+            # Notify admin (bot instance should be set via webhook_server)
+            from bot.webhook_server import bot_instance
             admin_chat_id = settings.admin_chat_id
-            if admin_chat_id:
-                # Note: Requires bot instance, handled in main.py
-                pass
+            if admin_chat_id and bot_instance:
+                try:
+                    await bot_instance.send_message(
+                        admin_chat_id,
+                        f"⏰ Дедлайн истёк для задачи #{task_id}. Проверка не была пройдена. Задача отменена.",
+                    )
+                except Exception as e:
+                    logger.error("admin_deadline_notification_failed", error=str(e))
 
     except PlanfixError as e:
         logger.error("task_deadline_check_failed", task_id=task_id, error=str(e))
@@ -86,6 +92,10 @@ def shutdown_scheduler() -> None:
     """Shutdown the scheduler."""
     scheduler.shutdown()
     logger.info("scheduler_shutdown")
+
+
+
+
 
 
 

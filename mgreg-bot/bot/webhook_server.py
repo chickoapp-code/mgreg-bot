@@ -9,8 +9,9 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
-from fastapi import FastAPI, Header, HTTPException, Request, Response
+from fastapi import FastAPI, Header, HTTPException, Request, Response, Security
 from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from bot.config import get_settings
 from bot.database import get_database
@@ -20,24 +21,21 @@ from bot.services.planfix import PlanfixClient, PlanfixError
 logger = get_logger(__name__)
 settings = get_settings()
 app = FastAPI(title="Planfix-Telegram Bot Webhooks")
+security = HTTPBasic()
 
 # Global instances (will be initialized in startup)
 planfix_client: Optional[PlanfixClient] = None
 bot_instance: Optional[Any] = None  # Telegram Bot instance
 
 
-def verify_planfix_signature(body: bytes, signature: Optional[str]) -> bool:
-    """Verify Planfix webhook signature."""
-    if not settings.planfix_webhook_secret:
-        return True  # Skip verification if secret not set
-    if not signature:
-        return False
-    expected = hmac.new(
-        settings.planfix_webhook_secret.encode(),
-        body,
-        hashlib.sha256,
-    ).hexdigest()
-    return hmac.compare_digest(expected, signature)
+def verify_planfix_basic_auth(credentials: HTTPBasicCredentials) -> bool:
+    """Verify Planfix webhook Basic Auth credentials."""
+    if not settings.planfix_webhook_login or not settings.planfix_webhook_password:
+        return True  # Skip verification if credentials not set
+    return (
+        credentials.username == settings.planfix_webhook_login
+        and credentials.password == settings.planfix_webhook_password
+    )
 
 
 def verify_yforms_signature(body: bytes, signature: Optional[str]) -> bool:
@@ -92,26 +90,46 @@ async def shutdown() -> None:
     logger.info("webhook_server_shutdown")
 
 
-@app.post("/webhooks/planfix")
+@app.post("/webhooks/planfix-guest")
 async def planfix_webhook(
     request: Request,
-    x_planfix_signature: Optional[str] = Header(None, alias="X-Planfix-Signature"),
+    credentials: HTTPBasicCredentials = Security(security),
 ) -> Dict[str, str]:
-    """Handle webhook from Planfix."""
+    """Handle webhook from Planfix for guest invitation automation."""
+    if not verify_planfix_basic_auth(credentials):
+        logger.warning("planfix_webhook_invalid_credentials", username=credentials.username)
+        raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
+    
     body = await request.body()
-    if not verify_planfix_signature(body, x_planfix_signature):
-        logger.warning("planfix_webhook_invalid_signature")
-        raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
         data = json.loads(body)
         event = data.get("event")
-        task_id = data.get("taskId")
+        task_id = data.get("taskId") or data.get("task", {}).get("id")
 
-        if event == "task.created" and task_id:
+        if not event or not task_id:
+            logger.warning("planfix_webhook_missing_fields", event=event, task_id=task_id)
+            return {"status": "ok", "message": "Missing event or taskId"}
+
+        # Handle different event types according to TZ
+        if event == "task.created":
             await handle_task_created(data)
-        elif event == "task.updated" and task_id:
+        elif event == "task.assignee.manual":
+            await handle_task_assignee_manual(data)
+        elif event == "task.wait_form":
+            await handle_task_wait_form(data)
+        elif event == "task.deadline_failed":
+            await handle_task_deadline_failed(data)
+        elif event == "task.cancelled_manual":
+            await handle_task_cancelled_manual(data)
+        elif event == "task.completed_compensation":
+            await handle_task_completed_compensation(data)
+        elif event == "task.deadline_updated":
+            await handle_task_deadline_updated(data)
+        elif event == "task.updated":
             await handle_task_updated(data)
+        else:
+            logger.info("planfix_webhook_unknown_event", event=event, task_id=task_id)
 
         return {"status": "ok"}
     except Exception as e:
@@ -121,30 +139,58 @@ async def planfix_webhook(
 
 async def handle_task_created(data: Dict[str, Any]) -> None:
     """Handle task.created event."""
-    task_id = data["taskId"]
-    template = data.get("template", "")
+    # Support both old format (taskId) and new format (task.id)
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    if not task_id:
+        logger.error("planfix_task_created_missing_task_id", data=data)
+        return
+    template = data.get("template", "") or data.get("task", {}).get("templateName", "")
 
-    # Check if this is a restaurant check task
-    if settings.task_template_ids_list:
-        # Get full task details to check template ID
-        try:
-            task = await planfix_client.get_task(task_id, fields="id,template")
-            template_obj = task.get("template", {})
+    # Get full task details from Planfix
+    try:
+        task_details = await planfix_client.get_task(
+            task_id,
+            fields="id,name,description,template,dateTime,endDateTime,customFieldData",
+        )
+        
+        # Check if this is a restaurant check task
+        if settings.task_template_ids_list:
+            template_obj = task_details.get("template", {})
             template_id = template_obj.get("id")
             if template_id not in settings.task_template_ids_list:
                 logger.info("planfix_task_ignored", task_id=task_id, template_id=template_id)
                 return
-        except PlanfixError as e:
-            logger.error("planfix_task_fetch_error", task_id=task_id, error=str(e))
-            return
-
-    # Extract task data
-    restaurant = data.get("restaurant", {})
-    restaurant_name = restaurant.get("name", "")
-    restaurant_address = restaurant.get("address", "")
-    visit_date = data.get("visitDate", "")
-    deadline = data.get("deadline", "")
-    invited_guests = data.get("invitedGuests", [])
+        
+        # Extract data from task or webhook payload (webhook takes precedence for specific fields)
+        # Support both old format (restaurant) and new format (task.restaurant)
+        restaurant = data.get("restaurant", {}) or data.get("task", {}).get("restaurant", {})
+        restaurant_name = restaurant.get("name") or task_details.get("name", "")
+        restaurant_address = restaurant.get("address", "")
+        
+        # Support visit data from different locations
+        visit = data.get("visit", {}) or data.get("task", {}).get("visit", {})
+        visit_date = visit.get("date") or data.get("visitDate", "")
+        
+        # Support deadline from different locations
+        deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
+        if not deadline and task_details.get("endDateTime"):
+            end_dt = task_details.get("endDateTime", {})
+            if isinstance(end_dt, dict):
+                deadline = end_dt.get("date", "")
+        
+        # Support guests array from different locations
+        invited_guests = data.get("invitedGuests", []) or data.get("guests", [])
+        if not invited_guests and isinstance(data.get("guests"), list):
+            invited_guests = [g.get("id") if isinstance(g, dict) else g for g in data.get("guests", [])]
+    except PlanfixError as e:
+        logger.error("planfix_task_details_fetch_error", task_id=task_id, error=str(e))
+        # Fallback to webhook data only
+        restaurant = data.get("restaurant", {})
+        restaurant_name = restaurant.get("name", "")
+        restaurant_address = restaurant.get("address", "")
+        visit_date = data.get("visitDate", "")
+        deadline = data.get("deadline", "")
+        invited_guests = data.get("invitedGuests", [])
 
     # Save task to database
     db = get_database()
@@ -158,14 +204,23 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     )
 
     # Check if executor already assigned
-    task_details = await planfix_client.get_task(task_id, fields="id,assignees")
-    assignees = task_details.get("assignees", [])
-    if assignees:
-        logger.info("planfix_task_already_assigned", task_id=task_id)
-        return
+    try:
+        task_assignees = await planfix_client.get_task(task_id, fields="id,assignees")
+        assignees = task_assignees.get("assignees", [])
+        if assignees:
+            logger.info("planfix_task_already_assigned", task_id=task_id)
+            return
+    except PlanfixError as e:
+        logger.error("planfix_task_assignees_check_failed", task_id=task_id, error=str(e))
+        # Continue anyway - will check again when guest accepts
 
     # Send invitations
     await send_invitations(task_id, invited_guests, restaurant_name, restaurant_address, visit_date)
+
+    # Schedule deadline check
+    if deadline:
+        from bot.scheduler import schedule_deadline_check
+        await schedule_deadline_check(task_id, deadline, planfix_client)
 
     # Log in Planfix
     await planfix_client.add_task_comment(
@@ -281,13 +336,26 @@ async def webapp_start(
 
     # Get task details for display
     try:
-        task = await planfix_client.get_task(taskId, fields="id,name,description")
+        task = await planfix_client.get_task(taskId, fields="id,name,description,endDateTime")
         task_name = task.get("name", f"Задача #{taskId}")
+        # Extract deadline for display
+        end_dt = task.get("endDateTime", {})
+        deadline_display = ""
+        if isinstance(end_dt, dict):
+            deadline_date = end_dt.get("date", "")
+            deadline_time = end_dt.get("time", "")
+            if deadline_date:
+                deadline_display = f"Дедлайн: {deadline_date}"
+                if deadline_time:
+                    deadline_display += f" {deadline_time}"
     except Exception:
         task_name = f"Задача #{taskId}"
+        deadline_display = ""
 
-    # Create redirect URL with session parameters
-    redirect_url = f"{form_url}?sessionId={session_id}&taskId={taskId}&guestId={guestId}&form={form}"
+    # Create redirect URL with session parameters (according to TZ: formCode and sessionId)
+    # Support both old format (form) and new format (formCode)
+    form_code = form  # Use form as formCode if not specified separately
+    redirect_url = f"{form_url}?taskId={taskId}&guestId={guestId}&formCode={form_code}&sessionId={session_id}"
 
     html_content = f"""
     <!DOCTYPE html>
@@ -321,11 +389,17 @@ async def webapp_start(
                 font-weight: bold;
                 margin-top: 15px;
             }}
+            .deadline {{
+                color: #666;
+                font-size: 14px;
+                margin-top: 10px;
+            }}
         </style>
     </head>
     <body>
         <div class="card">
             <h2>{task_name}</h2>
+            {f'<p class="deadline">{deadline_display}</p>' if deadline_display else ''}
             <p>Нажмите кнопку ниже, чтобы открыть форму для заполнения.</p>
             <a href="{redirect_url}" class="button">Открыть форму</a>
         </div>
@@ -351,7 +425,8 @@ async def yforms_webhook(
         session_id = data.get("sessionId")
         task_id = data.get("taskId")
         guest_id = data.get("guestId")
-        form = data.get("form")
+        # Support both old format (form) and new format (formCode)
+        form = data.get("form") or data.get("formCode")
         result = data.get("result", {})
         attachments = data.get("attachments", [])
 
@@ -420,8 +495,9 @@ async def handle_form_submission(
                 logger.error("file_upload_failed", url=file_url, error=str(e))
 
     if file_ids and settings.result_files_field_id:
+        # Planfix expects file IDs as array for file custom fields
         custom_field_data.append(
-            {"field": {"id": settings.result_files_field_id}, "value": ",".join(map(str, file_ids))}
+            {"field": {"id": settings.result_files_field_id}, "value": file_ids}
         )
 
     # Update task

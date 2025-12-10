@@ -21,8 +21,9 @@ class Settings(BaseSettings):
     admin_chat_id: Optional[int] = Field(default=None, alias="ADMIN_CHAT_ID")
     planfix_template_id: int = Field(default=413, alias="PLANFIX_TEMPLATE_ID")
 
-    # Webhook secrets
-    planfix_webhook_secret: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_SECRET")
+    # Webhook authentication
+    planfix_webhook_login: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_LOGIN")
+    planfix_webhook_password: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_PASSWORD")
     webapp_hmac_secret: str = Field(alias="WEBAPP_HMAC_SECRET")
     yforms_webhook_secret: str = Field(alias="YFORMS_WEBHOOK_SECRET")
 
@@ -36,12 +37,13 @@ class Settings(BaseSettings):
     # Server configuration
     webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
     webhook_port: int = Field(default=8000, alias="WEBHOOK_PORT")
-    webhook_base_url: Optional[str] = Field(default=None, alias="WEBHOOK_BASE_URL")
+    webhook_base_url: str = Field(default="http://crmbot.restme.pro", alias="WEBHOOK_BASE_URL")
 
     # Database
     database_path: str = Field(default="bot.db", alias="DATABASE_PATH")
 
     # Form URLs (comma-separated: resto_a,resto_b,resto_c,delivery_a,delivery_b,delivery_c)
+    # Or with form codes: resto_a,resto_b,resto_c,delivery_adjika,delivery_hinkal,delivery_myasorub
     form_urls: Optional[str] = Field(default=None, alias="FORM_URLS")
 
     model_config = {
@@ -62,8 +64,21 @@ class Settings(BaseSettings):
         if not self.form_urls:
             return {}
         urls = [x.strip() for x in self.form_urls.split(",") if x.strip()]
+        # Support both old format and new format with form codes
         form_names = ["resto_a", "resto_b", "resto_c", "delivery_a", "delivery_b", "delivery_c"]
-        return dict(zip(form_names, urls))
+        base_dict = dict(zip(form_names, urls))
+        
+        # Add mappings for new form codes (delivery_adjika, delivery_hinkal, delivery_myasorub)
+        form_code_mapping = {
+            "delivery_adjika": "delivery_a",
+            "delivery_hinkal": "delivery_b",
+            "delivery_myasorub": "delivery_c",
+        }
+        for form_code, mapped_form in form_code_mapping.items():
+            if mapped_form in base_dict:
+                base_dict[form_code] = base_dict[mapped_form]
+        
+        return base_dict
 
 
 @lru_cache
