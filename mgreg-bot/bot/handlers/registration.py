@@ -259,8 +259,18 @@ async def confirm_registration(
     bot_data: dict,
 ) -> None:
     await callback.answer()
+    # Ensure telegram_id is saved in state (update if missing)
+    if callback.from_user:
+        current_data = await state.get_data()
+        if not current_data.get("telegram_id"):
+            await state.update_data(
+                telegram_id=callback.from_user.id,
+                telegram_username=callback.from_user.username,
+            )
     data = await state.get_data()
+    logger.info("confirm_registration", telegram_id=data.get("telegram_id"), telegram_username=data.get("telegram_username"))
     contact_data = build_contact_data(data)
+    logger.info("contact_data_built", telegram_id=contact_data.telegram_id, telegram_username=contact_data.telegram_username)
 
     client: PlanfixClient | None = bot_data.get("planfix_client")
     if client is None:
@@ -313,8 +323,18 @@ async def duplicate_update(
     bot_data: dict,
 ) -> None:
     await callback.answer()
+    # Ensure telegram_id is saved in state (update if missing)
+    if callback.from_user:
+        current_data = await state.get_data()
+        if not current_data.get("telegram_id"):
+            await state.update_data(
+                telegram_id=callback.from_user.id,
+                telegram_username=callback.from_user.username,
+            )
     data = await state.get_data()
+    logger.info("duplicate_update", telegram_id=data.get("telegram_id"), telegram_username=data.get("telegram_username"))
     contact_data = build_contact_data(data)
+    logger.info("contact_data_built_duplicate", telegram_id=contact_data.telegram_id, telegram_username=contact_data.telegram_username)
     await _create_contact(callback, state, contact_data, bot_data, update_existing=True)
 
 
@@ -365,9 +385,18 @@ async def _create_contact(
         from bot.database import get_database
 
         db = get_database()
+        # Try to get telegram_id from contact_data first, then from callback, then from state
         telegram_id = contact_data.telegram_id
         telegram_username = contact_data.telegram_username
+        
+        # Fallback: get from callback if not in contact_data
+        if not telegram_id and callback.from_user:
+            telegram_id = callback.from_user.id
+            telegram_username = callback.from_user.username or telegram_username
+            logger.info("telegram_id_from_callback", telegram_id=telegram_id, telegram_username=telegram_username)
+        
         if telegram_id:
+            logger.info("saving_telegram_mapping", planfix_contact_id=int(contact_id), telegram_id=telegram_id, telegram_username=telegram_username)
             await db.execute(
                 """
                 INSERT OR REPLACE INTO guest_telegram_map 
@@ -376,6 +405,9 @@ async def _create_contact(
                 """,
                 (int(contact_id), telegram_id, telegram_username),
             )
+            logger.info("telegram_mapping_saved", planfix_contact_id=int(contact_id), telegram_id=telegram_id)
+        else:
+            logger.error("telegram_id_missing", contact_id=contact_id, contact_data_telegram_id=contact_data.telegram_id)
 
         admin_chat_id = bot_data.get("admin_chat_id")
         admin_name = bot_data.get("admin_name")

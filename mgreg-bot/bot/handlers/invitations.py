@@ -69,6 +69,9 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
     lock = get_lock(task_id)
     async with lock:
         # Check if task already has executor
+        # Note: If task is not found in Planfix (e.g., it's deleted or doesn't exist yet),
+        # we continue anyway as the task might have been created by automation and not yet available via API
+        task = None
         try:
             task = await client.get_task(task_id, fields="id,assignees")
             assignees = task.get("assignees", [])
@@ -78,17 +81,21 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 await withdraw_invitations(task_id, callback.message.chat.id, callback.message.message_id, db)
                 return
         except PlanfixError as e:
-            logger.error("planfix_task_check_failed", task_id=task_id, error=str(e))
-            await callback.message.answer("Ошибка при проверке задачи. Попробуй позже.")
-            return
+            # Log error but continue - task might not be available via API yet (created by automation)
+            logger.warning("planfix_task_check_failed", task_id=task_id, error=str(e), message="Continuing anyway")
+            # Don't return - allow assignment to proceed
 
         # Assign executor
         try:
             await client.set_task_executors(task_id, [guest_planfix_id])
-            await client.add_task_comment(
-                task_id,
-                f"✅ Гость (ID: {guest_planfix_id}) принял приглашение и назначен исполнителем.",
-            )
+            # Try to add comment (may fail if task not found, but that's ok)
+            try:
+                await client.add_task_comment(
+                    task_id,
+                    f"✅ Гость (ID: {guest_planfix_id}) принял приглашение и назначен исполнителем.",
+                )
+            except PlanfixError as comment_error:
+                logger.warning("planfix_comment_add_failed_after_assignment", task_id=task_id, error=str(comment_error))
 
             # Update database
             await db.execute(

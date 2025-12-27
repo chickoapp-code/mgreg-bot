@@ -180,7 +180,7 @@ class PlanfixClient:
         *,
         status: Optional[int] = None,
         custom_field_data: Optional[list[Dict[str, Any]]] = None,
-        assignees: Optional[list[Dict[str, Any]]] = None,
+        assignees: Optional[Dict[str, Any]] = None,
         silent: bool = False,
     ) -> Dict[str, Any]:
         """Update task."""
@@ -209,7 +209,8 @@ class PlanfixClient:
     ) -> Dict[str, Any]:
         """Add comment to task."""
         logger.info("planfix_task_comment_add", task_id=task_id)
-        payload = {"text": text}
+        # Planfix API expects "description" field, not "text"
+        payload = {"description": text}
         params = {}
         if silent:
             params["silent"] = "true"
@@ -270,9 +271,20 @@ class PlanfixClient:
         *,
         silent: bool = False,
     ) -> Dict[str, Any]:
-        """Set task executors (assignees)."""
+        """Set task executors (assignees).
+        
+        According to Planfix API, assignees should be in format:
+        {
+          "users": [{"id": "contact:1"}, ...],
+          "groups": [...]
+        }
+        """
         logger.info("planfix_task_set_executors", task_id=task_id, executors=executor_contact_ids)
-        assignees = [{"contact": {"id": cid}} for cid in executor_contact_ids]
+        # Planfix API expects assignees as object with "users" array
+        # Contact IDs should be formatted as "contact:ID" or just ID as integer
+        assignees = {
+            "users": [{"id": f"contact:{cid}"} for cid in executor_contact_ids]
+        }
         return await self.update_task(task_id, assignees=assignees, silent=silent)
 
     async def get_contact(self, contact_id: int) -> Dict[str, Any]:
