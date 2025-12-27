@@ -18,6 +18,7 @@ scheduler = AsyncIOScheduler()
 
 
 async def check_task_deadline(task_id: int, client: PlanfixClient) -> None:
+    """Check if task deadline has passed and form was not submitted."""
     """Check if task deadline passed and handle accordingly."""
     db = get_database()
 
@@ -38,9 +39,9 @@ async def check_task_deadline(task_id: int, client: PlanfixClient) -> None:
     # Task not completed - cancel it
     try:
         if settings.status_cancelled_id:
-            await client.update_task(task_id, status=settings.status_cancelled_id)
+            await client.update_task(int(task_id), status=settings.status_cancelled_id)
             await client.add_task_comment(
-                task_id,
+                int(task_id),
                 "⏰ Дедлайн истёк. Проверка не была пройдена. Задача отменена.",
             )
             logger.info("task_deadline_cancelled", task_id=task_id)
@@ -62,10 +63,25 @@ async def check_task_deadline(task_id: int, client: PlanfixClient) -> None:
 
 
 async def schedule_deadline_check(task_id: int, deadline_str: str, client: PlanfixClient) -> None:
-    """Schedule deadline check for task."""
+    """Schedule deadline check for task.
+    
+    Args:
+        task_id: Task ID (must be int)
+        deadline_str: Deadline in ISO format (YYYY-MM-DD) or Planfix format (DD-MM-YYYY)
+        client: Planfix client instance
+    """
     try:
-        # Parse deadline
-        deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+        # Parse deadline - try ISO format first
+        try:
+            deadline = datetime.fromisoformat(deadline_str.replace("Z", "+00:00"))
+        except ValueError:
+            # Try Planfix format (DD-MM-YYYY)
+            try:
+                deadline = datetime.strptime(deadline_str, "%d-%m-%Y")
+            except ValueError:
+                # Try DD.MM.YYYY format
+                deadline = datetime.strptime(deadline_str, "%d.%m.%Y")
+        
         if deadline.tzinfo is None:
             deadline = deadline.replace(tzinfo=timezone.utc)
 

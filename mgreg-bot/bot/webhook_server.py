@@ -9,6 +9,36 @@ from datetime import datetime
 from typing import Any, Dict, Optional
 from uuid import uuid4
 
+
+def normalize_planfix_date(date_str: str) -> str:
+    """Convert Planfix date format (DD-MM-YYYY) to ISO format (YYYY-MM-DD)."""
+    if not date_str:
+        return ""
+    
+    # Try to parse DD-MM-YYYY format
+    try:
+        dt = datetime.strptime(date_str, "%d-%m-%Y")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    
+    # Try to parse DD.MM.YYYY format
+    try:
+        dt = datetime.strptime(date_str, "%d.%m.%Y")
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    
+    # If already in ISO format or other format, try fromisoformat
+    try:
+        dt = datetime.fromisoformat(date_str.replace("Z", "+00:00"))
+        return dt.strftime("%Y-%m-%d")
+    except ValueError:
+        pass
+    
+    # Return as-is if can't parse
+    return date_str
+
 from fastapi import FastAPI, Header, HTTPException, Request, Response, Security
 from fastapi.responses import HTMLResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
@@ -206,7 +236,11 @@ async def planfix_webhook(
 
 
 async def handle_task_created(data: Dict[str, Any]) -> None:
-    """Handle task.created event."""
+    """Handle task.created event.
+    
+    Note: Planfix automation has already changed status to "В подборе гостя".
+    Bot should only send invitations and schedule deadline check.
+    """
     logger.info("handle_task_created_started", data_keys=list(data.keys()) if isinstance(data, dict) else None)
     
     # Support both old format (taskId) and new format (task.id)
@@ -223,7 +257,7 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Get full task details from Planfix
     try:
         task_details = await planfix_client.get_task(
-            task_id,
+            int(task_id),
             fields="id,name,description,template,dateTime,endDateTime,customFieldData",
         )
         
@@ -293,18 +327,20 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
 
     # Save task to database
     db = get_database()
+    # Normalize deadline for database storage
+    normalized_deadline = normalize_planfix_date(deadline) if deadline else ""
     await db.execute(
         """
         INSERT OR REPLACE INTO tasks 
         (task_id, restaurant_name, restaurant_address, visit_date, deadline, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (task_id, restaurant_name, restaurant_address, visit_date, deadline, "pending", datetime.now().isoformat()),
+        (task_id, restaurant_name, restaurant_address, visit_date, normalized_deadline, "pending", datetime.now().isoformat()),
     )
 
     # Check if executor already assigned
     try:
-        task_assignees = await planfix_client.get_task(task_id, fields="id,assignees")
+        task_assignees = await planfix_client.get_task(int(task_id), fields="id,assignees")
         assignees = task_assignees.get("assignees", [])
         if assignees:
             logger.info("planfix_task_already_assigned", task_id=task_id)
@@ -319,17 +355,26 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Schedule deadline check
     if deadline:
         from bot.scheduler import schedule_deadline_check
-        await schedule_deadline_check(task_id, deadline, planfix_client)
+        normalized_deadline = normalize_planfix_date(deadline)
+        if normalized_deadline:
+            await schedule_deadline_check(int(task_id), normalized_deadline, planfix_client)
 
     # Log in Planfix
-    await planfix_client.add_task_comment(
-        task_id,
-        f"✅ Задача создана. Отправлено приглашений: {len(invited_guests)}",
-    )
+    try:
+        await planfix_client.add_task_comment(
+            int(task_id),
+            f"✅ Задача создана. Отправлено приглашений: {len(invited_guests)}",
+        )
+    except PlanfixError as e:
+        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
 
 
 async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
-    """Handle task.assignee.manual event - manual executor assignment."""
+    """Handle task.assignee.manual event - manual executor assignment.
+    
+    Note: Planfix automation has already changed status to "Гость назначен".
+    Bot should only update local database.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
     # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
@@ -342,6 +387,7 @@ async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_assignee_manual", task_id=task_id, guest_id=guest_id)
     
     # Update database
+    # Note: Planfix automation has already changed status to "Гость назначен"
     db = get_database()
     await db.execute(
         """
@@ -352,15 +398,22 @@ async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
         (guest_id, task_id),
     )
     
-    # Add comment
-    await planfix_client.add_task_comment(
-        task_id,
-        f"✅ Исполнитель назначен вручную: контакт ID {guest_id}",
-    )
+    # Optional: Add informational comment (automation may not add comment)
+    try:
+        await planfix_client.add_task_comment(
+            int(task_id),
+            f"✅ Исполнитель назначен вручную: контакт ID {guest_id}",
+        )
+    except PlanfixError as e:
+        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
 
 
 async def handle_task_wait_form(data: Dict[str, Any]) -> None:
-    """Handle task.wait_form event - task waiting for form submission."""
+    """Handle task.wait_form event - task waiting for form submission.
+    
+    Note: Planfix automation has already changed status to "Ожидаем анкету" and set deadline.
+    Bot should only update local database and reschedule deadline check.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
     # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
@@ -379,30 +432,41 @@ async def handle_task_wait_form(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_wait_form", task_id=task_id, guest_id=guest_id, deadline=deadline)
     
     # Update database
+    # Note: Planfix automation has already changed status to "Ожидаем анкету" and set deadline if needed
     db = get_database()
+    normalized_deadline = normalize_planfix_date(deadline) if deadline else ""
     await db.execute(
         """
         UPDATE tasks 
         SET status = 'waiting_form', deadline = ?
         WHERE task_id = ?
         """,
-        (deadline, task_id),
+        (normalized_deadline, task_id),
     )
     
     # Schedule deadline check if not already scheduled
     if deadline:
         from bot.scheduler import schedule_deadline_check
-        await schedule_deadline_check(task_id, deadline, planfix_client)
+        normalized_deadline = normalize_planfix_date(deadline)
+        if normalized_deadline:
+            await schedule_deadline_check(int(task_id), normalized_deadline, planfix_client)
     
-    # Add comment
-    await planfix_client.add_task_comment(
-        task_id,
-        f"⏳ Ожидаем заполнение анкеты. Дедлайн: {deadline or 'не указан'}",
-    )
+    # Optional: Add informational comment (automation may not add comment)
+    try:
+        await planfix_client.add_task_comment(
+            int(task_id),
+            f"⏳ Ожидаем заполнение анкеты. Дедлайн: {deadline or 'не указан'}",
+        )
+    except PlanfixError as e:
+        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
 
 
 async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
-    """Handle task.deadline_failed event - deadline expired without submission."""
+    """Handle task.deadline_failed event - deadline expired without submission.
+    
+    Note: Planfix automation has already changed status to "Отменена по дедлайну" and added comment.
+    Bot should only update local database and notify admin.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
     # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
@@ -417,6 +481,7 @@ async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_deadline_failed", task_id=task_id, guest_id=guest_id)
     
     # Update database
+    # Note: Planfix automation has already changed status to "Отменена по дедлайну" and added comment
     db = get_database()
     await db.execute(
         """
@@ -427,18 +492,8 @@ async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
         (task_id,),
     )
     
-    # Change status in Planfix (if not already changed by automation)
-    if settings.status_cancelled_id:
-        try:
-            await planfix_client.update_task(task_id, status=settings.status_cancelled_id)
-        except PlanfixError as e:
-            logger.error("planfix_status_update_failed", task_id=task_id, error=str(e))
-    
-    # Add comment
-    await planfix_client.add_task_comment(
-        task_id,
-        f"⏰ {reason}. Задача автоматически отменена.",
-    )
+    # Note: Status and comment are already set by Planfix automation
+    # Bot only updates local database and notifies admin
     
     # Notify admin
     if bot_instance and settings.admin_chat_id:
@@ -452,7 +507,12 @@ async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
 
 
 async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
-    """Handle task.cancelled_manual event - manual cancellation."""
+    """Handle task.cancelled_manual event - manual cancellation.
+    
+    Note: Planfix automation has already changed status to "Отменена вручную".
+    Optional comment with reason may be added by automation if "Причина отмены" field is used.
+    Bot should only update local database and notify admin.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
     # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
@@ -468,6 +528,8 @@ async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_cancelled_manual", task_id=task_id, guest_id=guest_id, reason=reason)
     
     # Update database
+    # Note: Planfix automation has already changed status to "Отменена вручную"
+    # Optional comment with reason may be added by automation if "Причина отмены" field is used
     db = get_database()
     await db.execute(
         """
@@ -478,11 +540,9 @@ async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
         (task_id,),
     )
     
-    # Add comment
-    comment_text = f"❌ Задача отменена вручную."
-    if reason:
-        comment_text += f" Причина: {reason}"
-    await planfix_client.add_task_comment(task_id, comment_text)
+    # Note: Status is already changed by Planfix automation
+    # Comment with reason may already be added by automation
+    # Bot only updates local database and notifies admin
     
     # Notify admin
     if bot_instance and settings.admin_chat_id:
@@ -496,7 +556,11 @@ async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
 
 
 async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
-    """Handle task.completed_compensation event - task completed, ready for compensation."""
+    """Handle task.completed_compensation event - task completed, ready for compensation.
+    
+    Note: Planfix automation has already changed status to "Завершена (к компенсации)".
+    Bot should only update local database, add comment with results, and notify admin.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
     # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
@@ -512,6 +576,7 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_completed_compensation", task_id=task_id, guest_id=guest_id)
     
     # Update database
+    # Note: Planfix automation has already changed status to "Завершена (к компенсации)"
     db = get_database()
     await db.execute(
         """
@@ -522,7 +587,7 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
         (task_id,),
     )
     
-    # Add comment with results
+    # Add comment with results (optional - automation may not add detailed comment)
     comment_text = f"✅ Задача завершена, к компенсации."
     if isinstance(result, dict):
         score = result.get("score")
@@ -540,7 +605,10 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
         if status:
             comment_text += f" Статус возмещения: {status}."
     
-    await planfix_client.add_task_comment(task_id, comment_text)
+    try:
+        await planfix_client.add_task_comment(int(task_id), comment_text)
+    except PlanfixError as e:
+        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
     
     # Notify admin
     if bot_instance and settings.admin_chat_id:
@@ -554,7 +622,11 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
 
 
 async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
-    """Handle task.deadline_updated event - deadline changed."""
+    """Handle task.deadline_updated event - deadline changed.
+    
+    Note: Planfix automation has already updated deadline in Planfix.
+    Bot should only update local database and reschedule deadline check.
+    """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     # Support deadline from visit.deadline (Planfix format) or direct deadline
     visit = data.get("visit", {})
@@ -565,26 +637,27 @@ async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_deadline_updated", task_id=task_id, deadline=deadline)
     
     # Update database
+    # Note: Planfix automation has already updated deadline in Planfix
     db = get_database()
+    normalized_deadline = normalize_planfix_date(deadline) if deadline else ""
     await db.execute(
         """
         UPDATE tasks 
         SET deadline = ?
         WHERE task_id = ?
         """,
-        (deadline, task_id),
+        (normalized_deadline, task_id),
     )
     
     # Reschedule deadline check
     if deadline:
         from bot.scheduler import schedule_deadline_check
-        await schedule_deadline_check(task_id, deadline, planfix_client)
+        normalized_deadline = normalize_planfix_date(deadline)
+        if normalized_deadline:
+            await schedule_deadline_check(int(task_id), normalized_deadline, planfix_client)
     
-    # Add comment
-    await planfix_client.add_task_comment(
-        task_id,
-        f"📅 Дедлайн обновлён: {deadline}",
-    )
+    # Note: Deadline is already updated in Planfix by automation
+    # Bot only updates local database and reschedules deadline check
 
 
 async def handle_task_updated(data: Dict[str, Any]) -> None:
@@ -846,7 +919,7 @@ async def handle_form_submission(
         file_url = attachment.get("url")
         if file_url:
             try:
-                file_result = await planfix_client.upload_file_from_url(task_id, file_url)
+                file_result = await planfix_client.upload_file_from_url(int(task_id), file_url)
                 file_id = file_result.get("id") or file_result.get("file", {}).get("id")
                 if file_id:
                     file_ids.append(file_id)
@@ -861,17 +934,26 @@ async def handle_form_submission(
 
     # Update task
     if custom_field_data:
-        await planfix_client.update_task(task_id, custom_field_data=custom_field_data)
+        try:
+            await planfix_client.update_task(int(task_id), custom_field_data=custom_field_data)
+        except PlanfixError as e:
+            logger.error("planfix_task_update_failed", task_id=task_id, error=str(e))
 
     # Change status to "Done"
     if settings.status_done_id:
-        await planfix_client.update_task(task_id, status=settings.status_done_id)
+        try:
+            await planfix_client.update_task(int(task_id), status=settings.status_done_id)
+        except PlanfixError as e:
+            logger.error("planfix_status_update_failed", task_id=task_id, error=str(e))
 
     # Add comment
     comment_text = f"✅ Анкета получена от гостя (ID: {guest_id}). Форма: {form}."
     if score:
         comment_text += f" Оценка: {score}."
-    await planfix_client.add_task_comment(task_id, comment_text)
+    try:
+        await planfix_client.add_task_comment(int(task_id), comment_text)
+    except PlanfixError as e:
+        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
 
     # Notify admin
     if bot_instance and settings.admin_chat_id:
