@@ -86,8 +86,10 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
             # Don't return - allow assignment to proceed
 
         # Assign executor
+        assignment_success = False
         try:
             await client.set_task_executors(task_id, [guest_planfix_id])
+            assignment_success = True
             # Try to add comment (may fail if task not found, but that's ok)
             try:
                 await client.add_task_comment(
@@ -96,13 +98,38 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 )
             except PlanfixError as comment_error:
                 logger.warning("planfix_comment_add_failed_after_assignment", task_id=task_id, error=str(comment_error))
+        except PlanfixError as e:
+            error_message = str(e).lower()
+            # Check if task not found error
+            if "not found" in error_message or "code\":1000" in error_message:
+                logger.warning(
+                    "planfix_executor_assignment_failed_task_not_found",
+                    task_id=task_id,
+                    error=str(e),
+                    message="Task may not be available via API yet, will update DB anyway"
+                )
+                # Task not available via API yet (created by automation), but we'll update DB
+                assignment_success = False
+            else:
+                logger.error("planfix_executor_assignment_failed", task_id=task_id, error=str(e))
+                await callback.message.answer(
+                    "Произошла ошибка при назначении. Задача зарезервирована за тобой. "
+                    "Попробуй позже или обратись к администратору."
+                )
+                # Update database anyway to mark assignment attempt
+                await db.execute(
+                    "UPDATE tasks SET assigned_guest_id = ? WHERE task_id = ?",
+                    (guest_planfix_id, task_id),
+                )
+                return
 
-            # Update database
-            await db.execute(
-                "UPDATE tasks SET assigned_guest_id = ? WHERE task_id = ?",
-                (guest_planfix_id, task_id),
-            )
+        # Update database (whether assignment succeeded or task not found)
+        await db.execute(
+            "UPDATE tasks SET assigned_guest_id = ? WHERE task_id = ?",
+            (guest_planfix_id, task_id),
+        )
 
+        if assignment_success:
             # Send success message with WebApp button
             webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings, client=client)
             if webapp_url:
@@ -126,19 +153,22 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 await callback.message.answer(
                     "Отлично! Ты закреплён(а) за этой проверкой. Свяжемся с тобой для дальнейших инструкций."
                 )
-
-            # Withdraw all invitations for this task
-            await withdraw_all_invitations(
-                task_id,
-                callback.message.chat.id,
-                callback.message.message_id,
-                db,
-                bot_instance=callback.bot,
+        else:
+            # Task not found via API yet, but assignment is recorded in DB
+            await callback.message.answer(
+                "✅ Приглашение принято! Задача зарезервирована за тобой. "
+                "Как только задача станет доступна, мы автоматически назначим тебя исполнителем. "
+                "Свяжемся с тобой для дальнейших инструкций."
             )
 
-        except PlanfixError as e:
-            logger.error("planfix_executor_assignment_failed", task_id=task_id, error=str(e))
-            await callback.message.answer("Ошибка при назначении. Попробуй позже.")
+        # Withdraw all invitations for this task
+        await withdraw_all_invitations(
+            task_id,
+            callback.message.chat.id,
+            callback.message.message_id,
+            db,
+            bot_instance=callback.bot,
+        )
 
 
 @router.callback_query(F.data.startswith("decline|"))
