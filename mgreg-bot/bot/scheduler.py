@@ -84,14 +84,20 @@ async def schedule_deadline_check(task_id: int, deadline_str: str, client: Planf
 
 def start_scheduler() -> None:
     """Start the scheduler."""
-    scheduler.start()
-    logger.info("scheduler_started")
+    if not scheduler.running:
+        scheduler.start()
+        logger.info("scheduler_started")
+    else:
+        logger.info("scheduler_already_running")
 
 
 def shutdown_scheduler() -> None:
     """Shutdown the scheduler."""
-    scheduler.shutdown()
-    logger.info("scheduler_shutdown")
+    if scheduler.running:
+        scheduler.shutdown()
+        logger.info("scheduler_shutdown")
+    else:
+        logger.info("scheduler_already_stopped")
 
 
 

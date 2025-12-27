@@ -82,11 +82,11 @@ async def main() -> None:
 
     async def on_startup_handler() -> None:
         logger.info("bot_startup")
-        start_scheduler()
+        # Scheduler is started in lifespan context manager
 
     async def on_shutdown_handler() -> None:
         logger.info("bot_shutdown")
-        shutdown_scheduler()
+        # Scheduler is stopped in lifespan context manager
         await planfix_client.close()
 
     dp.startup.register(on_startup_handler)
