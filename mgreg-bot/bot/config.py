@@ -36,7 +36,7 @@ class Settings(BaseSettings):
 
     # Server configuration
     webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")
-    webhook_port: int = Field(default=8000, alias="WEBHOOK_PORT")
+    webhook_port: int = Field(default=8001, alias="WEBHOOK_PORT")
     webhook_base_url: str = Field(default="http://crmbot.restme.pro", alias="WEBHOOK_BASE_URL")
 
     # Database

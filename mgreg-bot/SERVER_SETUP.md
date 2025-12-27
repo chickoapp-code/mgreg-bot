@@ -143,7 +143,7 @@ ADMIN_CHAT_ID=123456789    # Ваш Telegram Chat ID
 # ВАЖНО: Используйте 0.0.0.0 для прослушивания на всех интерфейсах
 # НЕ используйте конкретный IP адрес - это вызовет ошибку "cannot assign requested address"
 WEBHOOK_HOST=0.0.0.0       # Слушать на всех интерфейсах (ОБЯЗАТЕЛЬНО!)
-WEBHOOK_PORT=8000          # Порт для вебхук-сервера
+WEBHOOK_PORT=8001          # Порт для вебхук-сервера
 WEBHOOK_BASE_URL=http://crmbot.restme.pro  # Публичный URL сервера (для внешних запросов)
 
 # WebApp and Forms Configuration
@@ -247,7 +247,7 @@ server {
     # return 301 https://$server_name$request_uri;
 
     location / {
-        proxy_pass http://127.0.0.1:8000;
+        proxy_pass http://127.0.0.1:8001;
         proxy_set_header Host $host;
         proxy_set_header X-Real-IP $remote_addr;
         proxy_set_header X-Forwarded-For $proxy_add_x_forwarded_for;
@@ -469,7 +469,7 @@ FORM_URLS=https://forms.yandex.ru/u/форма1,https://forms.yandex.ru/u/фор
 sudo systemctl status crmbot
 
 # Проверка доступности вебхука-сервера
-curl http://localhost:8000/webhooks/planfix-guest
+curl http://localhost:8001/webhooks/planfix-guest
 
 # Проверка через публичный URL
 curl http://crmbot.restme.pro/webhooks/planfix-guest
@@ -763,7 +763,7 @@ docker run -d \
   --name crmbot \
   --restart unless-stopped \
   --env-file .env \
-  -p 8000:8000 \
+  -p 8001:8001 \
   crmbot
 
 # Просмотр логов
@@ -889,13 +889,13 @@ ls -la ~/mgreg-bot/bot.db
 
 ```bash
 # Проверка, что служба слушает на правильном порту
-sudo netstat -tulpn | grep 8000
+sudo netstat -tulpn | grep 8001
 
 # Проверка правил firewall
 sudo ufw status
 
 # Открытие порта (если нужно)
-sudo ufw allow 8000/tcp
+sudo ufw allow 8001/tcp
 ```
 
 ### Проблема: Ошибки подключения к Planfix

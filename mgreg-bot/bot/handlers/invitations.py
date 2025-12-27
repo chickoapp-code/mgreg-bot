@@ -261,7 +261,7 @@ async def generate_webapp_url(task_id: int, guest_id: int, settings, client: Pla
     if not settings or not hasattr(settings, "webhook_base_url"):
         return None
 
-    base_url = settings.webhook_base_url or "http://localhost:8000"
+    base_url = settings.webhook_base_url or "http://localhost:8001"
     
     # Determine form type from task (default to resto_a)
     form = "resto_a"
