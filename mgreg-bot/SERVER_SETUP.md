@@ -389,7 +389,7 @@ sudo journalctl -u crmbot --since "1 hour ago"
 1. Войдите в Planfix
 2. Перейдите в настройки автоматизации
 3. Создайте новый вебхук со следующими параметрами:
-   - **URL**: `http://crmbot.restme.pro/webhooks/planfix-guest` (или `https://` если настроен SSL)
+   - **URL**: `https://crmbot.restme.pro/webhooks/planfix-guest` (или `http://` если не настроен SSL)
    - **Метод**: POST
    - **Аутентификация**: Basic Auth
      - Логин: значение из `PLANFIX_WEBHOOK_LOGIN`
@@ -883,6 +883,83 @@ sudo journalctl -u crmbot -n 50
 # Проверка прав доступа к файлам
 ls -la ~/mgreg-bot/.env
 ls -la ~/mgreg-bot/bot.db
+```
+
+### Проверка работы Nginx
+
+Для быстрой проверки работы Nginx используйте скрипт:
+
+```bash
+# Перейдите в директорию проекта
+cd ~/mgreg-bot/mgreg-bot
+
+# Запустите скрипт проверки
+./test_nginx.sh
+```
+
+Или проверьте вручную:
+
+**1. Проверка синтаксиса конфигурации:**
+```bash
+sudo nginx -t
+```
+Должно быть: `nginx: configuration file /etc/nginx/nginx.conf test is successful`
+
+**2. Проверка статуса службы:**
+```bash
+sudo systemctl status nginx
+```
+Должно быть: `Active: active (running)`
+
+**3. Проверка, что Nginx слушает на порту 80:**
+```bash
+sudo ss -tulpn | grep :80
+# или
+sudo netstat -tulpn | grep :80
+```
+Должно показать процесс nginx на порту 80
+
+**4. Проверка, что вебхук-сервер слушает на порту 8001:**
+```bash
+sudo ss -tulpn | grep :8001
+```
+Должно показать процесс python на порту 8001
+
+**5. Проверка прямого доступа к вебхук-серверу:**
+```bash
+curl http://localhost:8001/
+```
+Должно вернуть: `{"status":"ok","service":"crmbot-webhook-server"}`
+
+**6. Проверка доступа через Nginx:**
+```bash
+curl http://localhost/
+# или
+curl http://crmbot.restme.pro/
+```
+Должно вернуть тот же ответ, что и в пункте 5
+
+**7. Проверка конкретного эндпоинта:**
+```bash
+curl http://localhost/webhooks/planfix-guest
+```
+Должно вернуть JSON с информацией об эндпоинте
+
+**8. Проверка логов Nginx:**
+```bash
+# Последние записи
+sudo tail -f /var/log/nginx/access.log
+
+# Ошибки
+sudo tail -f /var/log/nginx/error.log
+```
+
+**9. Перезагрузка конфигурации Nginx (если изменили конфиг):**
+```bash
+sudo nginx -t                    # Проверка синтаксиса
+sudo systemctl reload nginx      # Перезагрузка без остановки
+# или
+sudo systemctl restart nginx     # Полный перезапуск
 ```
 
 ### Проблема: Вебхук не доступен извне
