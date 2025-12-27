@@ -119,6 +119,29 @@ async def shutdown() -> None:
     logger.info("webhook_server_shutdown")
 
 
+@app.get("/")
+async def root() -> Dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "ok", "service": "crmbot-webhook-server"}
+
+
+@app.get("/health")
+async def health() -> Dict[str, str]:
+    """Health check endpoint."""
+    return {"status": "ok", "service": "crmbot-webhook-server"}
+
+
+@app.get("/webhooks/planfix-guest")
+async def planfix_webhook_get() -> Dict[str, str]:
+    """Health check for Planfix webhook endpoint."""
+    return {
+        "status": "ok",
+        "message": "Planfix webhook endpoint is available. Use POST method to send webhooks.",
+        "endpoint": "/webhooks/planfix-guest",
+        "method": "POST",
+    }
+
+
 @app.post("/webhooks/planfix-guest")
 async def planfix_webhook(
     request: Request,
