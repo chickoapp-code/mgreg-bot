@@ -168,10 +168,12 @@ async def planfix_webhook(
         event = data.get("event")
         task_id = data.get("taskId") or data.get("task", {}).get("id")
 
-        logger.info("planfix_webhook_event_extracted", event=event, task_id=task_id)
+        logger.info("planfix_webhook_event_extracted", event_type=event, task_id=task_id)
 
         if not event or not task_id:
-            logger.warning("planfix_webhook_missing_fields", event=event, task_id=task_id, full_data=data)
+            # Avoid passing data dict directly to prevent event key conflict
+            data_str = str(data) if data else "None"
+            logger.warning("planfix_webhook_missing_fields", event_type=event, task_id=task_id, full_data_str=data_str)
             return {"status": "ok", "message": "Missing event or taskId"}
 
         # Handle different event types according to TZ
@@ -192,7 +194,7 @@ async def planfix_webhook(
         elif event == "task.updated":
             await handle_task_updated(data)
         else:
-            logger.info("planfix_webhook_unknown_event", event=event, task_id=task_id)
+            logger.info("planfix_webhook_unknown_event", event_type=event, task_id=task_id)
 
         return {"status": "ok"}
     except Exception as e:
@@ -207,7 +209,9 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Support both old format (taskId) and new format (task.id)
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     if not task_id:
-        logger.error("planfix_task_created_missing_task_id", data=data)
+        # Avoid passing data dict directly to prevent event key conflict
+        data_str = str(data) if data else "None"
+        logger.error("planfix_task_created_missing_task_id", data_str=data_str)
         return
     
     logger.info("planfix_task_created_processing", task_id=task_id)
