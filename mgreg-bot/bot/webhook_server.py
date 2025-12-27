@@ -96,26 +96,29 @@ def verify_webapp_signature(params: Dict[str, str], signature: str, secret: str)
     return hmac.compare_digest(generate_webapp_signature(params, secret), signature)
 
 
+# Note: planfix_client is now initialized in main.py lifespan and set via set_planfix_client()
+# Keeping @app.on_event handlers for backward compatibility, but they may not be called
+# if lifespan context manager is used
 @app.on_event("startup")
 async def startup() -> None:
-    """Initialize services on startup."""
+    """Initialize services on startup (fallback if lifespan is not used)."""
     global planfix_client
-    db = get_database(settings.database_path)
-    await db.init()
-    planfix_client = PlanfixClient(
-        base_url=str(settings.planfix_base_url),
-        token=settings.planfix_token,
-        template_id=settings.planfix_template_id,
-    )
+    if planfix_client is None:
+        # Only initialize if not already set via set_planfix_client()
+        db = get_database(settings.database_path)
+        await db.init()
+        planfix_client = PlanfixClient(
+            base_url=str(settings.planfix_base_url),
+            token=settings.planfix_token,
+            template_id=settings.planfix_template_id,
+        )
     logger.info("webhook_server_started")
 
 
 @app.on_event("shutdown")
 async def shutdown() -> None:
-    """Cleanup on shutdown."""
-    global planfix_client
-    if planfix_client:
-        await planfix_client.close()
+    """Cleanup on shutdown (fallback if lifespan is not used)."""
+    # Note: planfix_client cleanup is handled in main.py lifespan
     logger.info("webhook_server_shutdown")
 
 
@@ -245,26 +248,48 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         visit = data.get("visit", {}) or data.get("task", {}).get("visit", {})
         visit_date = visit.get("date") or data.get("visitDate", "")
         
-        # Support deadline from different locations
-        deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
+        # Support deadline from different locations (visit.deadline takes precedence)
+        deadline = visit.get("deadline") or data.get("deadline") or data.get("task", {}).get("deadline", "")
         if not deadline and task_details.get("endDateTime"):
             end_dt = task_details.get("endDateTime", {})
             if isinstance(end_dt, dict):
                 deadline = end_dt.get("date", "")
         
-        # Support guests array from different locations
-        invited_guests = data.get("invitedGuests", []) or data.get("guests", [])
-        if not invited_guests and isinstance(data.get("guests"), list):
-            invited_guests = [g.get("id") if isinstance(g, dict) else g for g in data.get("guests", [])]
+        # Extract guests from webhook payload
+        # Planfix sends: guests: [{planfixContactId: "...", name: "..."}]
+        invited_guests = []
+        guests_data = data.get("guests", []) or data.get("invitedGuests", [])
+        if isinstance(guests_data, list):
+            for g in guests_data:
+                if isinstance(g, dict):
+                    # Support both planfixContactId (from Planfix webhook) and id (backward compatibility)
+                    guest_id = g.get("planfixContactId") or g.get("id") or g.get("planfix_contact_id")
+                    if guest_id:
+                        invited_guests.append(int(guest_id))
+                elif isinstance(g, (int, str)):
+                    # Direct ID (backward compatibility)
+                    invited_guests.append(int(g))
     except PlanfixError as e:
         logger.error("planfix_task_details_fetch_error", task_id=task_id, error=str(e))
         # Fallback to webhook data only
         restaurant = data.get("restaurant", {})
         restaurant_name = restaurant.get("name", "")
         restaurant_address = restaurant.get("address", "")
-        visit_date = data.get("visitDate", "")
-        deadline = data.get("deadline", "")
-        invited_guests = data.get("invitedGuests", [])
+        visit = data.get("visit", {})
+        visit_date = visit.get("date") or data.get("visitDate", "")
+        deadline = visit.get("deadline") or data.get("deadline", "")
+        
+        # Extract guests from webhook payload (fallback)
+        invited_guests = []
+        guests_data = data.get("guests", []) or data.get("invitedGuests", [])
+        if isinstance(guests_data, list):
+            for g in guests_data:
+                if isinstance(g, dict):
+                    guest_id = g.get("planfixContactId") or g.get("id") or g.get("planfix_contact_id")
+                    if guest_id:
+                        invited_guests.append(int(guest_id))
+                elif isinstance(g, (int, str)):
+                    invited_guests.append(int(g))
 
     # Save task to database
     db = get_database()
@@ -307,7 +332,12 @@ async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
     """Handle task.assignee.manual event - manual executor assignment."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
-    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
+    guest_id = None
+    if isinstance(guest, dict):
+        guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
+    elif isinstance(guest, (int, str)):
+        guest_id = int(guest)
     
     logger.info("planfix_task_assignee_manual", task_id=task_id, guest_id=guest_id)
     
@@ -333,8 +363,18 @@ async def handle_task_wait_form(data: Dict[str, Any]) -> None:
     """Handle task.wait_form event - task waiting for form submission."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
-    guest_id = guest.get("id") if isinstance(guest, dict) else guest
-    deadline = data.get("deadline") or data.get("task", {}).get("deadline")
+    # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
+    guest_id = None
+    if isinstance(guest, dict):
+        guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
+    elif isinstance(guest, (int, str)):
+        guest_id = int(guest)
+    
+    # Support deadline from visit.deadline (Planfix format) or direct deadline
+    visit = data.get("visit", {})
+    deadline = visit.get("deadline") if isinstance(visit, dict) else None
+    if not deadline:
+        deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
     
     logger.info("planfix_task_wait_form", task_id=task_id, guest_id=guest_id, deadline=deadline)
     
@@ -365,7 +405,13 @@ async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
     """Handle task.deadline_failed event - deadline expired without submission."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
-    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
+    guest_id = None
+    if isinstance(guest, dict):
+        guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
+    elif isinstance(guest, (int, str)):
+        guest_id = int(guest)
+    
     reason = data.get("reason", "Анкета не получена до дедлайна")
     
     logger.info("planfix_task_deadline_failed", task_id=task_id, guest_id=guest_id)
@@ -409,9 +455,15 @@ async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
     """Handle task.cancelled_manual event - manual cancellation."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
-    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
+    guest_id = None
+    if isinstance(guest, dict):
+        guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
+    elif isinstance(guest, (int, str)):
+        guest_id = int(guest)
+    
     cancel = data.get("cancel", {})
-    reason = cancel.get("reason") if isinstance(cancel, dict) else cancel
+    reason = cancel.get("reason") if isinstance(cancel, dict) else (cancel if isinstance(cancel, str) else None)
     
     logger.info("planfix_task_cancelled_manual", task_id=task_id, guest_id=guest_id, reason=reason)
     
@@ -447,7 +499,13 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
     """Handle task.completed_compensation event - task completed, ready for compensation."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
-    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    # Support planfixContactId (from Planfix webhook) and id (backward compatibility)
+    guest_id = None
+    if isinstance(guest, dict):
+        guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
+    elif isinstance(guest, (int, str)):
+        guest_id = int(guest)
+    
     result = data.get("result", {})
     finance = data.get("finance", {})
     
@@ -466,18 +524,21 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
     
     # Add comment with results
     comment_text = f"✅ Задача завершена, к компенсации."
-    if result:
+    if isinstance(result, dict):
         score = result.get("score")
         summary = result.get("summary")
         if score:
             comment_text += f" Оценка: {score}."
         if summary:
             comment_text += f" {summary}"
-    if finance:
+    if isinstance(finance, dict):
         budget = finance.get("budget")
         actual = finance.get("actual")
+        status = finance.get("status")
         if budget or actual:
             comment_text += f" Бюджет: {budget or 'не указан'}, Факт: {actual or 'не указан'}."
+        if status:
+            comment_text += f" Статус возмещения: {status}."
     
     await planfix_client.add_task_comment(task_id, comment_text)
     
@@ -495,7 +556,11 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
 async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
     """Handle task.deadline_updated event - deadline changed."""
     task_id = data.get("taskId") or data.get("task", {}).get("id")
-    deadline = data.get("deadline") or data.get("task", {}).get("deadline")
+    # Support deadline from visit.deadline (Planfix format) or direct deadline
+    visit = data.get("visit", {})
+    deadline = visit.get("deadline") if isinstance(visit, dict) else None
+    if not deadline:
+        deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
     
     logger.info("planfix_task_deadline_updated", task_id=task_id, deadline=deadline)
     
@@ -829,4 +894,10 @@ def set_bot_instance(bot: Any) -> None:
     """Set Telegram bot instance for sending messages."""
     global bot_instance
     bot_instance = bot
+
+
+def set_planfix_client(client: PlanfixClient) -> None:
+    """Set Planfix client instance for webhook handlers."""
+    global planfix_client
+    planfix_client = client
 

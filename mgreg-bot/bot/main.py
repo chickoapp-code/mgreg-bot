@@ -17,7 +17,7 @@ from bot.logging import configure_logging, get_logger
 from bot.middleware import BotDataMiddleware
 from bot.scheduler import shutdown_scheduler, start_scheduler
 from bot.services.planfix import PlanfixClient
-from bot.webhook_server import app as webhook_app, set_bot_instance
+from bot.webhook_server import app as webhook_app, set_bot_instance, set_planfix_client
 
 
 logger = get_logger(__name__)
@@ -30,10 +30,21 @@ async def lifespan(app):
     settings = get_settings()
     db = get_database(settings.database_path)
     await db.init()
+    
+    # Initialize Planfix client for webhook server
+    planfix_client_webhook = PlanfixClient(
+        base_url=str(settings.planfix_base_url),
+        token=settings.planfix_token,
+        template_id=settings.planfix_template_id,
+    )
+    set_planfix_client(planfix_client_webhook)
+    
     start_scheduler()
     yield
     # Shutdown
     shutdown_scheduler()
+    # Cleanup Planfix client
+    await planfix_client_webhook.close()
 
 
 webhook_app.router.lifespan_context = lifespan
