@@ -293,16 +293,21 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         # Planfix sends: guests: [{planfixContactId: "...", name: "..."}]
         invited_guests = []
         guests_data = data.get("guests", []) or data.get("invitedGuests", [])
+        logger.info("extracting_guests_from_webhook", guests_count=len(guests_data) if isinstance(guests_data, list) else 0, guests_type=type(guests_data).__name__)
         if isinstance(guests_data, list):
             for g in guests_data:
                 if isinstance(g, dict):
                     # Support both planfixContactId (from Planfix webhook) and id (backward compatibility)
                     guest_id = g.get("planfixContactId") or g.get("id") or g.get("planfix_contact_id")
+                    guest_name = g.get("name", "Unknown")
+                    logger.info("guest_dict_extracted", guest_id=guest_id, guest_name=guest_name)
                     if guest_id:
                         invited_guests.append(int(guest_id))
                 elif isinstance(g, (int, str)):
                     # Direct ID (backward compatibility)
+                    logger.info("guest_direct_id", guest_id=g)
                     invited_guests.append(int(g))
+        logger.info("guests_extracted", invited_guests=invited_guests, count=len(invited_guests))
     except PlanfixError as e:
         logger.error("planfix_task_details_fetch_error", task_id=task_id, error=str(e))
         # Fallback to webhook data only
@@ -316,14 +321,19 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         # Extract guests from webhook payload (fallback)
         invited_guests = []
         guests_data = data.get("guests", []) or data.get("invitedGuests", [])
+        logger.info("extracting_guests_from_webhook_fallback", guests_count=len(guests_data) if isinstance(guests_data, list) else 0, guests_type=type(guests_data).__name__)
         if isinstance(guests_data, list):
             for g in guests_data:
                 if isinstance(g, dict):
                     guest_id = g.get("planfixContactId") or g.get("id") or g.get("planfix_contact_id")
+                    guest_name = g.get("name", "Unknown")
+                    logger.info("guest_dict_extracted_fallback", guest_id=guest_id, guest_name=guest_name)
                     if guest_id:
                         invited_guests.append(int(guest_id))
                 elif isinstance(g, (int, str)):
+                    logger.info("guest_direct_id_fallback", guest_id=g)
                     invited_guests.append(int(g))
+        logger.info("guests_extracted_fallback", invited_guests=invited_guests, count=len(invited_guests))
 
     # Save task to database
     db = get_database()
@@ -681,6 +691,9 @@ async def send_invitations(
 
     db = get_database()
     sent_count = 0
+    not_found_guests = []
+
+    logger.info("send_invitations_started", task_id=task_id, guest_ids=guest_ids, count=len(guest_ids))
 
     for guest_id in guest_ids:
         # Get telegram_id from mapping
@@ -689,7 +702,8 @@ async def send_invitations(
             (guest_id,),
         )
         if not mapping:
-            logger.warning("guest_telegram_not_found", guest_id=guest_id)
+            logger.warning("guest_telegram_not_found", guest_id=guest_id, task_id=task_id)
+            not_found_guests.append(guest_id)
             continue
 
         telegram_id = mapping["telegram_id"]
@@ -725,10 +739,24 @@ async def send_invitations(
                 (task_id, guest_id, telegram_id, message.chat.id, message.message_id, datetime.now().isoformat()),
             )
             sent_count += 1
+            logger.info("invitation_sent", task_id=task_id, guest_id=guest_id, telegram_id=telegram_id)
         except Exception as e:
-            logger.error("invitation_send_failed", guest_id=guest_id, error=str(e))
+            logger.error("invitation_send_failed", guest_id=guest_id, telegram_id=telegram_id, error=str(e))
 
-    logger.info("invitations_sent", task_id=task_id, count=sent_count)
+    logger.info("invitations_sent", task_id=task_id, count=sent_count, total_guests=len(guest_ids), not_found_count=len(not_found_guests))
+    
+    # Notify admin if some guests were not found
+    if not_found_guests and bot_instance and settings.admin_chat_id:
+        try:
+            guests_list = ", ".join(str(gid) for gid in not_found_guests)
+            await bot_instance.send_message(
+                settings.admin_chat_id,
+                f"⚠️ Для задачи #{task_id} не найдены зарегистрированные гости в боте:\n"
+                f"Planfix Contact IDs: {guests_list}\n"
+                f"Эти гости должны зарегистрироваться в боте через /start",
+            )
+        except Exception as e:
+            logger.error("admin_not_found_guests_notification_failed", error=str(e))
 
 
 @app.get("/webapp/start")
