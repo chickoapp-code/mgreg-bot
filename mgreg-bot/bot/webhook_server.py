@@ -21,6 +21,35 @@ from bot.services.planfix import PlanfixClient, PlanfixError
 logger = get_logger(__name__)
 settings = get_settings()
 app = FastAPI(title="Planfix-Telegram Bot Webhooks")
+
+# Middleware for request logging
+@app.middleware("http")
+async def log_requests(request: Request, call_next):
+    """Log all incoming requests."""
+    start_time = datetime.now()
+    logger.info(
+        "http_request_received",
+        method=request.method,
+        path=request.url.path,
+        query_params=str(request.query_params),
+        client=request.client.host if request.client else None,
+    )
+    
+    try:
+        response = await call_next(request)
+        process_time = (datetime.now() - start_time).total_seconds()
+        logger.info(
+            "http_request_completed",
+            method=request.method,
+            path=request.url.path,
+            status_code=response.status_code,
+            process_time=process_time,
+        )
+        return response
+    except Exception as e:
+        logger.error("http_request_error", method=request.method, path=request.url.path, error=str(e))
+        raise
+
 security = HTTPBasic()
 
 # Global instances (will be initialized in startup)
@@ -96,19 +125,30 @@ async def planfix_webhook(
     credentials: HTTPBasicCredentials = Security(security),
 ) -> Dict[str, str]:
     """Handle webhook from Planfix for guest invitation automation."""
+    # Log incoming request
+    logger.info("planfix_webhook_received", method=request.method, url=str(request.url), client=request.client.host if request.client else None)
+    
+    # Verify authentication
     if not verify_planfix_basic_auth(credentials):
         logger.warning("planfix_webhook_invalid_credentials", username=credentials.username)
         raise HTTPException(status_code=401, detail="Invalid credentials", headers={"WWW-Authenticate": "Basic"})
     
+    logger.info("planfix_webhook_auth_success", username=credentials.username)
+    
     body = await request.body()
+    logger.info("planfix_webhook_body_received", body_length=len(body))
 
     try:
         data = json.loads(body)
+        logger.info("planfix_webhook_json_parsed", data_keys=list(data.keys()) if isinstance(data, dict) else None)
+        
         event = data.get("event")
         task_id = data.get("taskId") or data.get("task", {}).get("id")
 
+        logger.info("planfix_webhook_event_extracted", event=event, task_id=task_id)
+
         if not event or not task_id:
-            logger.warning("planfix_webhook_missing_fields", event=event, task_id=task_id)
+            logger.warning("planfix_webhook_missing_fields", event=event, task_id=task_id, full_data=data)
             return {"status": "ok", "message": "Missing event or taskId"}
 
         # Handle different event types according to TZ
@@ -139,11 +179,15 @@ async def planfix_webhook(
 
 async def handle_task_created(data: Dict[str, Any]) -> None:
     """Handle task.created event."""
+    logger.info("handle_task_created_started", data_keys=list(data.keys()) if isinstance(data, dict) else None)
+    
     # Support both old format (taskId) and new format (task.id)
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     if not task_id:
         logger.error("planfix_task_created_missing_task_id", data=data)
         return
+    
+    logger.info("planfix_task_created_processing", task_id=task_id)
     template = data.get("template", "") or data.get("task", {}).get("templateName", "")
 
     # Get full task details from Planfix
@@ -157,9 +201,12 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         if settings.task_template_ids_list:
             template_obj = task_details.get("template", {})
             template_id = template_obj.get("id")
+            logger.info("planfix_task_template_check", task_id=task_id, template_id=template_id, allowed_templates=settings.task_template_ids_list)
             if template_id not in settings.task_template_ids_list:
-                logger.info("planfix_task_ignored", task_id=task_id, template_id=template_id)
+                logger.info("planfix_task_ignored", task_id=task_id, template_id=template_id, reason="template_not_in_allowed_list")
                 return
+        else:
+            logger.info("planfix_task_template_check_skipped", task_id=task_id, reason="task_template_ids_list_not_configured")
         
         # Extract data from task or webhook payload (webhook takes precedence for specific fields)
         # Support both old format (restaurant) and new format (task.restaurant)
@@ -229,10 +276,230 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     )
 
 
+async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
+    """Handle task.assignee.manual event - manual executor assignment."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    guest = data.get("guest", {})
+    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    
+    logger.info("planfix_task_assignee_manual", task_id=task_id, guest_id=guest_id)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET assigned_guest_id = ?, status = 'assigned'
+        WHERE task_id = ?
+        """,
+        (guest_id, task_id),
+    )
+    
+    # Add comment
+    await planfix_client.add_task_comment(
+        task_id,
+        f"✅ Исполнитель назначен вручную: контакт ID {guest_id}",
+    )
+
+
+async def handle_task_wait_form(data: Dict[str, Any]) -> None:
+    """Handle task.wait_form event - task waiting for form submission."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    guest = data.get("guest", {})
+    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    deadline = data.get("deadline") or data.get("task", {}).get("deadline")
+    
+    logger.info("planfix_task_wait_form", task_id=task_id, guest_id=guest_id, deadline=deadline)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET status = 'waiting_form', deadline = ?
+        WHERE task_id = ?
+        """,
+        (deadline, task_id),
+    )
+    
+    # Schedule deadline check if not already scheduled
+    if deadline:
+        from bot.scheduler import schedule_deadline_check
+        await schedule_deadline_check(task_id, deadline, planfix_client)
+    
+    # Add comment
+    await planfix_client.add_task_comment(
+        task_id,
+        f"⏳ Ожидаем заполнение анкеты. Дедлайн: {deadline or 'не указан'}",
+    )
+
+
+async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
+    """Handle task.deadline_failed event - deadline expired without submission."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    guest = data.get("guest", {})
+    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    reason = data.get("reason", "Анкета не получена до дедлайна")
+    
+    logger.info("planfix_task_deadline_failed", task_id=task_id, guest_id=guest_id)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET status = 'cancelled_deadline'
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    )
+    
+    # Change status in Planfix (if not already changed by automation)
+    if settings.status_cancelled_id:
+        try:
+            await planfix_client.update_task(task_id, status=settings.status_cancelled_id)
+        except PlanfixError as e:
+            logger.error("planfix_status_update_failed", task_id=task_id, error=str(e))
+    
+    # Add comment
+    await planfix_client.add_task_comment(
+        task_id,
+        f"⏰ {reason}. Задача автоматически отменена.",
+    )
+    
+    # Notify admin
+    if bot_instance and settings.admin_chat_id:
+        try:
+            await bot_instance.send_message(
+                settings.admin_chat_id,
+                f"⏰ Дедлайн истёк для задачи #{task_id}. Проверка не была пройдена. Задача отменена.",
+            )
+        except Exception as e:
+            logger.error("admin_deadline_notification_failed", error=str(e))
+
+
+async def handle_task_cancelled_manual(data: Dict[str, Any]) -> None:
+    """Handle task.cancelled_manual event - manual cancellation."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    guest = data.get("guest", {})
+    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    cancel = data.get("cancel", {})
+    reason = cancel.get("reason") if isinstance(cancel, dict) else cancel
+    
+    logger.info("planfix_task_cancelled_manual", task_id=task_id, guest_id=guest_id, reason=reason)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET status = 'cancelled_manual'
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    )
+    
+    # Add comment
+    comment_text = f"❌ Задача отменена вручную."
+    if reason:
+        comment_text += f" Причина: {reason}"
+    await planfix_client.add_task_comment(task_id, comment_text)
+    
+    # Notify admin
+    if bot_instance and settings.admin_chat_id:
+        try:
+            await bot_instance.send_message(
+                settings.admin_chat_id,
+                f"❌ Задача #{task_id} отменена вручную. Причина: {reason or 'не указана'}",
+            )
+        except Exception as e:
+            logger.error("admin_cancellation_notification_failed", error=str(e))
+
+
+async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
+    """Handle task.completed_compensation event - task completed, ready for compensation."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    guest = data.get("guest", {})
+    guest_id = guest.get("id") if isinstance(guest, dict) else guest
+    result = data.get("result", {})
+    finance = data.get("finance", {})
+    
+    logger.info("planfix_task_completed_compensation", task_id=task_id, guest_id=guest_id)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET status = 'completed_compensation'
+        WHERE task_id = ?
+        """,
+        (task_id,),
+    )
+    
+    # Add comment with results
+    comment_text = f"✅ Задача завершена, к компенсации."
+    if result:
+        score = result.get("score")
+        summary = result.get("summary")
+        if score:
+            comment_text += f" Оценка: {score}."
+        if summary:
+            comment_text += f" {summary}"
+    if finance:
+        budget = finance.get("budget")
+        actual = finance.get("actual")
+        if budget or actual:
+            comment_text += f" Бюджет: {budget or 'не указан'}, Факт: {actual or 'не указан'}."
+    
+    await planfix_client.add_task_comment(task_id, comment_text)
+    
+    # Notify admin
+    if bot_instance and settings.admin_chat_id:
+        try:
+            await bot_instance.send_message(
+                settings.admin_chat_id,
+                f"✅ Задача #{task_id} завершена, к компенсации. Гость: {guest_id}",
+            )
+        except Exception as e:
+            logger.error("admin_completion_notification_failed", error=str(e))
+
+
+async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
+    """Handle task.deadline_updated event - deadline changed."""
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    deadline = data.get("deadline") or data.get("task", {}).get("deadline")
+    
+    logger.info("planfix_task_deadline_updated", task_id=task_id, deadline=deadline)
+    
+    # Update database
+    db = get_database()
+    await db.execute(
+        """
+        UPDATE tasks 
+        SET deadline = ?
+        WHERE task_id = ?
+        """,
+        (deadline, task_id),
+    )
+    
+    # Reschedule deadline check
+    if deadline:
+        from bot.scheduler import schedule_deadline_check
+        await schedule_deadline_check(task_id, deadline, planfix_client)
+    
+    # Add comment
+    await planfix_client.add_task_comment(
+        task_id,
+        f"📅 Дедлайн обновлён: {deadline}",
+    )
+
+
 async def handle_task_updated(data: Dict[str, Any]) -> None:
     """Handle task.updated event."""
     # Can be used for additional logic if needed
-    logger.info("planfix_task_updated", task_id=data.get("taskId"))
+    task_id = data.get("taskId") or data.get("task", {}).get("id")
+    logger.info("planfix_task_updated", task_id=task_id)
 
 
 async def send_invitations(

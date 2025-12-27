@@ -140,9 +140,11 @@ ADMIN_NAME=@ваш_telegram_username
 ADMIN_CHAT_ID=123456789    # Ваш Telegram Chat ID
 
 # Webhook Server Configuration
-WEBHOOK_HOST=0.0.0.0       # Слушать на всех интерфейсах
+# ВАЖНО: Используйте 0.0.0.0 для прослушивания на всех интерфейсах
+# НЕ используйте конкретный IP адрес - это вызовет ошибку "cannot assign requested address"
+WEBHOOK_HOST=0.0.0.0       # Слушать на всех интерфейсах (ОБЯЗАТЕЛЬНО!)
 WEBHOOK_PORT=8000          # Порт для вебхук-сервера
-WEBHOOK_BASE_URL=http://crmbot.restme.pro  # Публичный URL сервера
+WEBHOOK_BASE_URL=http://crmbot.restme.pro  # Публичный URL сервера (для внешних запросов)
 
 # WebApp and Forms Configuration
 # WEBAPP_HMAC_SECRET - секрет для подписи URL WebApp (защита от подделки запросов)
