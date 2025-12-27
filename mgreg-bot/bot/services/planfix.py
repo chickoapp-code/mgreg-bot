@@ -17,6 +17,19 @@ logger = get_logger(__name__)
 
 class PlanfixError(Exception):
     """Base exception for Planfix errors."""
+    
+    def __init__(self, message: str, status_code: int = 0, body: str = ""):
+        super().__init__(message)
+        self.message = message
+        self.status_code = status_code
+        self.body = body
+    
+    def is_task_not_found(self) -> bool:
+        """Check if error is due to task not found."""
+        if self.status_code == 400:
+            body_lower = self.body.lower()
+            return "not found" in body_lower or '"code":1000' in body_lower or '"code": 1000' in body_lower
+        return False
 
 
 class PlanfixClient:
@@ -72,17 +85,20 @@ class PlanfixClient:
                         endpoint=endpoint,
                         body=response.text,
                     )
-                    raise PlanfixError("Server error")
+                    raise PlanfixError("Server error", status_code=response.status_code, body=response.text)
 
                 if response.status_code >= 400:
+                    error_body = response.text
                     logger.error(
                         "planfix_request_failed",
                         status=response.status_code,
-                        body=response.text,
+                        body=error_body,
                         endpoint=endpoint,
                     )
                     raise PlanfixError(
-                        f"Planfix API error: {response.status_code}"
+                        f"Planfix API error: {response.status_code}",
+                        status_code=response.status_code,
+                        body=error_body,
                     )
 
                 return response.json()
@@ -246,7 +262,11 @@ class PlanfixClient:
                     timeout=self._timeout,
                 )
                 if response.status_code >= 400:
-                    raise PlanfixError(f"File upload failed: {response.status_code}")
+                    raise PlanfixError(
+                        f"File upload failed: {response.status_code}",
+                        status_code=response.status_code,
+                        body=response.text,
+                    )
                 return response.json()
 
     async def upload_file_from_url(

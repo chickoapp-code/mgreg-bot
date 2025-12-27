@@ -99,19 +99,26 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
             except PlanfixError as comment_error:
                 logger.warning("planfix_comment_add_failed_after_assignment", task_id=task_id, error=str(comment_error))
         except PlanfixError as e:
-            error_message = str(e).lower()
             # Check if task not found error
-            if "not found" in error_message or "code\":1000" in error_message:
+            if e.is_task_not_found():
                 logger.warning(
                     "planfix_executor_assignment_failed_task_not_found",
                     task_id=task_id,
                     error=str(e),
+                    status_code=e.status_code,
+                    body=e.body,
                     message="Task may not be available via API yet, will update DB anyway"
                 )
                 # Task not available via API yet (created by automation), but we'll update DB
                 assignment_success = False
             else:
-                logger.error("planfix_executor_assignment_failed", task_id=task_id, error=str(e))
+                logger.error(
+                    "planfix_executor_assignment_failed",
+                    task_id=task_id,
+                    error=str(e),
+                    status_code=e.status_code,
+                    body=e.body
+                )
                 await callback.message.answer(
                     "Произошла ошибка при назначении. Задача зарезервирована за тобой. "
                     "Попробуй позже или обратись к администратору."
