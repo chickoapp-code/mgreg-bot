@@ -100,9 +100,10 @@ def verify_planfix_basic_auth(credentials: HTTPBasicCredentials) -> bool:
 def get_task_number_from_webhook(data: Dict[str, Any]) -> str | int | None:
     """Extract task number (nomber) from webhook data.
     
-    Returns task number from 'nomber' field, or falls back to taskId/task.id for backward compatibility.
+    Returns task number from 'nomber' field (can be in root or task.nomber), or falls back to taskId/task.id for backward compatibility.
     """
-    return data.get("nomber") or data.get("taskId") or data.get("task", {}).get("id")
+    # Try nomber in root first, then in task.nomber, then fallback to taskId/task.id
+    return data.get("nomber") or data.get("task", {}).get("nomber") or data.get("taskId") or data.get("task", {}).get("id")
 
 
 async def get_task_nomber_from_db(task_id: int | str) -> str | None:
@@ -115,8 +116,13 @@ async def get_task_nomber_from_db(task_id: int | str) -> str | None:
         "SELECT nomber FROM tasks WHERE task_id = ?",
         (task_id,),
     )
-    if task_row and task_row.get("nomber"):
-        return str(task_row["nomber"])
+    if task_row:
+        try:
+            nomber = task_row["nomber"]
+            if nomber:
+                return str(nomber)
+        except (KeyError, TypeError):
+            pass
     return None
 
 
@@ -134,7 +140,7 @@ async def get_task_nomber_for_api(task_id: int | str, webhook_data: Dict[str, An
     """
     # Try webhook data first
     if webhook_data:
-        nomber = webhook_data.get("nomber")
+        nomber = webhook_data.get("nomber") or webhook_data.get("task", {}).get("nomber")
         if nomber:
             return str(nomber)
     
@@ -296,7 +302,8 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     
     # Extract nomber (task number) from webhook - this is used for API calls
     # nomber is the actual task number (e.g., "86190"), not the task ID (e.g., "17859014")
-    task_nomber = data.get("nomber")
+    # nomber can be in root or in task.nomber
+    task_nomber = get_task_number_from_webhook(data)
     if not task_nomber:
         # Avoid passing data dict directly to prevent event key conflict
         data_str = str(data) if data else "None"

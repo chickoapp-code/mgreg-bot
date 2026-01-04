@@ -156,7 +156,16 @@ async def retry_executor_assignments() -> None:
     
     for task_row in tasks:
         # Use nomber field for API calls (task number from webhook), not task_id
-        task_nomber = task_row.get("nomber")
+        # sqlite3.Row doesn't have .get() method, use direct access with try/except
+        try:
+            task_nomber = task_row["nomber"]
+            if task_nomber:
+                task_nomber = str(task_nomber)
+            else:
+                task_nomber = None
+        except (KeyError, TypeError):
+            task_nomber = None
+        
         if not task_nomber:
             # Fallback to task_id if nomber is not available (for backward compatibility)
             task_nomber = str(task_row["task_id"])

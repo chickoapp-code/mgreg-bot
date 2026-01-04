@@ -71,9 +71,15 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
         (task_id,),
     )
     task_nomber = None
-    if task_row and task_row.get("nomber"):
-        task_nomber = str(task_row["nomber"])
-    else:
+    if task_row:
+        try:
+            task_nomber = task_row["nomber"]
+            if task_nomber:
+                task_nomber = str(task_nomber)
+        except (KeyError, TypeError):
+            task_nomber = None
+    
+    if not task_nomber:
         # Fallback to task_id if nomber is not available (for backward compatibility)
         task_nomber = str(task_id)
         logger.warning("nomber_not_found_using_task_id", task_id=task_id)
@@ -258,9 +264,15 @@ async def handle_decline(callback: CallbackQuery, bot_data: dict) -> None:
                     (task_id,),
                 )
                 task_nomber = None
-                if task_row and task_row.get("nomber"):
-                    task_nomber = str(task_row["nomber"])
-                else:
+                if task_row:
+                    try:
+                        task_nomber = task_row["nomber"]
+                        if task_nomber:
+                            task_nomber = str(task_nomber)
+                    except (KeyError, TypeError):
+                        task_nomber = None
+                
+                if not task_nomber:
                     task_nomber = str(task_id)
                 await client.add_task_comment(task_nomber, "⚠️ Все приглашённые гости отказались от проверки.")
             except Exception as e:
@@ -352,9 +364,15 @@ async def generate_webapp_url(task_id: int, guest_id: int, settings, client: Pla
                 (task_id,),
             )
             task_nomber = None
-            if task_row and task_row.get("nomber"):
-                task_nomber = str(task_row["nomber"])
-            else:
+            if task_row:
+                try:
+                    task_nomber = task_row["nomber"]
+                    if task_nomber:
+                        task_nomber = str(task_nomber)
+                except (KeyError, TypeError):
+                    task_nomber = None
+            
+            if not task_nomber:
                 # Fallback to task_id if nomber is not available
                 task_nomber = str(task_id)
             
