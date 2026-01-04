@@ -40,7 +40,7 @@ def normalize_planfix_date(date_str: str) -> str:
     return date_str
 
 from fastapi import FastAPI, Header, HTTPException, Request, Response, Security
-from fastapi.responses import HTMLResponse, RedirectResponse
+from fastapi.responses import HTMLResponse, JSONResponse, RedirectResponse
 from fastapi.security import HTTPBasic, HTTPBasicCredentials
 
 from bot.config import get_settings
@@ -979,7 +979,7 @@ async def webapp_start(
 async def yforms_webhook(
     request: Request,
     x_forms_signature: Optional[str] = Header(None, alias="X-Forms-Signature"),
-) -> Dict[str, str]:
+):
     """Handle webhook from Yandex Forms."""
     body = await request.body()
     
@@ -1081,23 +1081,33 @@ async def yforms_webhook(
             )
             # Return JSON-RPC 2.0 error if request was JSON-RPC
             if isinstance(data, dict) and data.get("jsonrpc") == "2.0":
-                return {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32602, "message": "Missing required fields: sessionId and taskId"},
-                    "id": data.get("id"),
-                }
+                response_id = data.get("id")
+                if response_id is not None and not isinstance(response_id, str):
+                    response_id = str(response_id)
+                return JSONResponse(
+                    status_code=200,  # JSON-RPC errors use 200 with error object
+                    content={
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32602, "message": "Missing required fields: sessionId and taskId"},
+                        "id": response_id,
+                    }
+                )
             raise HTTPException(status_code=400, detail="Missing required fields: sessionId and taskId")
 
         await handle_form_submission(session_id, task_id, guest_id, form, result, attachments)
 
         # Return JSON-RPC 2.0 response if request was JSON-RPC
-        if data.get("jsonrpc") == "2.0":
-            return {
+        if isinstance(data, dict) and data.get("jsonrpc") == "2.0":
+            response_id = data.get("id")
+            # Convert id to string if it's a number (JSON-RPC allows both, but FastAPI validation may expect string)
+            if response_id is not None and not isinstance(response_id, str):
+                response_id = str(response_id)
+            return JSONResponse(content={
                 "jsonrpc": "2.0",
                 "result": {"status": "ok"},
-                "id": data.get("id"),
-            }
-        return {"status": "ok"}
+                "id": response_id,
+            })
+        return JSONResponse(content={"status": "ok"})
     except HTTPException:
         raise
     except json.JSONDecodeError as e:
@@ -1109,11 +1119,17 @@ async def yforms_webhook(
         try:
             parsed_data = json.loads(body)
             if isinstance(parsed_data, dict) and parsed_data.get("jsonrpc") == "2.0":
-                return {
-                    "jsonrpc": "2.0",
-                    "error": {"code": -32000, "message": str(e)},
-                    "id": parsed_data.get("id"),
-                }
+                response_id = parsed_data.get("id")
+                if response_id is not None and not isinstance(response_id, str):
+                    response_id = str(response_id)
+                return JSONResponse(
+                    status_code=200,  # JSON-RPC errors use 200 with error object
+                    content={
+                        "jsonrpc": "2.0",
+                        "error": {"code": -32000, "message": str(e)},
+                        "id": response_id,
+                    }
+                )
         except:
             pass
         raise HTTPException(status_code=500, detail=str(e))
