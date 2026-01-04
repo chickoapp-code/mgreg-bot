@@ -25,7 +25,7 @@ class Settings(BaseSettings):
     planfix_webhook_login: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_LOGIN")
     planfix_webhook_password: Optional[str] = Field(default=None, alias="PLANFIX_WEBHOOK_PASSWORD")
     webapp_hmac_secret: str = Field(alias="WEBAPP_HMAC_SECRET")
-    yforms_webhook_secret: str = Field(alias="YFORMS_WEBHOOK_SECRET")
+    yforms_webhook_secret: Optional[str] = Field(default=None, alias="YFORMS_WEBHOOK_SECRET")
 
     # Planfix task configuration
     planfix_task_template_ids: Optional[str] = Field(default=None, alias="PLANFIX_TASK_TEMPLATE_IDS")

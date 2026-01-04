@@ -154,9 +154,19 @@ async def get_task_nomber_for_api(task_id: int | str, webhook_data: Dict[str, An
 
 
 def verify_yforms_signature(body: bytes, signature: Optional[str]) -> bool:
-    """Verify Yandex Forms webhook signature."""
+    """Verify Yandex Forms webhook signature.
+    
+    If YFORMS_WEBHOOK_SECRET is not set, verification is skipped (returns True).
+    This allows working with Yandex Forms which don't support HMAC signature calculation.
+    """
+    # Skip verification if secret is not configured
+    if not settings.yforms_webhook_secret:
+        return True
+    
+    # If secret is configured but signature is missing, fail
     if not signature:
         return False
+    
     expected = hmac.new(
         settings.yforms_webhook_secret.encode(),
         body,
@@ -972,8 +982,23 @@ async def yforms_webhook(
 ) -> Dict[str, str]:
     """Handle webhook from Yandex Forms."""
     body = await request.body()
+    
+    # Log signature for debugging
+    body_preview = body[:200] if len(body) > 200 else body
+    logger.info(
+        "yforms_webhook_received",
+        body_length=len(body),
+        body_preview=body_preview.decode('utf-8', errors='ignore') if body_preview else None,
+        signature_received=x_forms_signature[:20] + "..." if x_forms_signature and len(x_forms_signature) > 20 else x_forms_signature,
+    )
+    
     if not verify_yforms_signature(body, x_forms_signature):
-        logger.warning("yforms_webhook_invalid_signature")
+        logger.warning(
+            "yforms_webhook_invalid_signature",
+            body_length=len(body),
+            signature_received=x_forms_signature[:20] + "..." if x_forms_signature and len(x_forms_signature) > 20 else x_forms_signature,
+            note="Check YFORMS_WEBHOOK_SECRET configuration"
+        )
         raise HTTPException(status_code=401, detail="Invalid signature")
 
     try:
