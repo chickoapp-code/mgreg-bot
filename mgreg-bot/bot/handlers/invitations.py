@@ -74,8 +74,15 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
         task = None
         try:
             task = await client.get_task(task_id, fields="id,assignees")
-            assignees = task.get("assignees", [])
-            if assignees:
+            assignees = task.get("assignees", {})
+            # Handle both formats: object with "users" field or list
+            if isinstance(assignees, dict):
+                users = assignees.get("users", [])
+            elif isinstance(assignees, list):
+                users = assignees
+            else:
+                users = []
+            if users:
                 # Already assigned
                 await callback.message.answer("Мы уже нашли тайного гостя для этой проверки. Спасибо!")
                 await withdraw_invitations(task_id, callback.message.chat.id, callback.message.message_id, db)

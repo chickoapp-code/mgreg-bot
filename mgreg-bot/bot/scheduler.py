@@ -1,4 +1,4 @@
-"""Scheduler for deadline jobs."""
+"""Scheduler for deadline jobs and retry executor assignments."""
 
 from __future__ import annotations
 
@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 from apscheduler.schedulers.asyncio import AsyncIOScheduler
 from apscheduler.triggers.date import DateTrigger
+from apscheduler.triggers.interval import IntervalTrigger
 
 from bot.config import get_settings
 from bot.database import get_database
@@ -103,8 +104,145 @@ def start_scheduler() -> None:
     if not scheduler.running:
         scheduler.start()
         logger.info("scheduler_started")
+        
+        # Schedule periodic retry of executor assignments (every 30 seconds)
+        scheduler.add_job(
+            retry_executor_assignments,
+            trigger=IntervalTrigger(seconds=30),
+            id="retry_executor_assignments",
+            replace_existing=True,
+        )
+        logger.info("retry_executor_assignments_job_scheduled")
     else:
         logger.info("scheduler_already_running")
+
+
+async def retry_executor_assignments() -> None:
+    """Retry executor assignments for tasks that were reserved but executor not yet assigned in Planfix."""
+    db = get_database()
+    
+    # Get planfix_client from webhook_server
+    from bot.webhook_server import planfix_client
+    if not planfix_client:
+        logger.warning("planfix_client_not_available_for_retry")
+        return
+    
+    # Find tasks with assigned_guest_id but check if executor is actually assigned in Planfix
+    tasks = await db.fetch_all(
+        """
+        SELECT task_id, assigned_guest_id 
+        FROM tasks 
+        WHERE assigned_guest_id IS NOT NULL
+        ORDER BY created_at DESC
+        LIMIT 50
+        """
+    )
+    
+    if not tasks:
+        return
+    
+    logger.info("retry_executor_assignments_started", count=len(tasks))
+    
+    for task_row in tasks:
+        task_id = task_row["task_id"]
+        guest_planfix_id = task_row["assigned_guest_id"]
+        
+        try:
+            # Check if executor is already assigned in Planfix
+            task = await planfix_client.get_task(task_id, fields="id,assignees")
+            assignees = task.get("assignees", {})
+            
+            # Handle both formats: object with "users" field or list
+            if isinstance(assignees, dict):
+                users = assignees.get("users", [])
+            elif isinstance(assignees, list):
+                users = assignees
+            else:
+                users = []
+            
+            # Check if our guest is already in assignees
+            # User ID can be in formats: "contact:427", "user:5", or just "427"
+            guest_assigned = False
+            for user in users:
+                user_id = str(user.get("id", ""))
+                # Check various formats
+                if (
+                    user_id.endswith(f":{guest_planfix_id}") or
+                    user_id == str(guest_planfix_id) or
+                    user_id == f"contact:{guest_planfix_id}"
+                ):
+                    guest_assigned = True
+                    break
+            
+            if guest_assigned:
+                # Already assigned, skip
+                logger.debug("executor_already_assigned", task_id=task_id, guest_id=guest_planfix_id)
+                continue
+            
+            # Try to assign executor
+            logger.info("retry_executor_assignment", task_id=task_id, guest_id=guest_planfix_id)
+            await planfix_client.set_task_executors(task_id, [guest_planfix_id])
+            
+            # Try to add comment
+            try:
+                await planfix_client.add_task_comment(
+                    task_id,
+                    f"✅ Гость (ID: {guest_planfix_id}) принял приглашение и назначен исполнителем.",
+                )
+            except PlanfixError as comment_error:
+                logger.warning("retry_comment_add_failed", task_id=task_id, error=str(comment_error))
+            
+            logger.info("retry_executor_assignment_success", task_id=task_id, guest_id=guest_planfix_id)
+            
+            # Notify user via Telegram if bot instance is available
+            from bot.webhook_server import bot_instance
+            if bot_instance:
+                try:
+                    # Get telegram_id from guest_planfix_id
+                    guest_mapping = await db.fetch_one(
+                        "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                        (guest_planfix_id,),
+                    )
+                    if guest_mapping:
+                        telegram_id = guest_mapping["telegram_id"]
+                        # Try to get WebApp URL
+                        from bot.handlers.invitations import generate_webapp_url
+                        webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings, client=planfix_client)
+                        
+                        if webapp_url:
+                            from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
+                            keyboard = InlineKeyboardMarkup(
+                                inline_keyboard=[
+                                    [
+                                        InlineKeyboardButton(
+                                            text="Начать прохождение",
+                                            web_app=WebAppInfo(url=webapp_url),
+                                        )
+                                    ]
+                                ]
+                            )
+                            await bot_instance.send_message(
+                                telegram_id,
+                                "✅ Отлично! Ты теперь назначен(а) исполнителем задачи. Нажми «Начать прохождение», чтобы заполнить анкету.",
+                                reply_markup=keyboard,
+                            )
+                        else:
+                            await bot_instance.send_message(
+                                telegram_id,
+                                "✅ Отлично! Ты теперь назначен(а) исполнителем задачи. Свяжемся с тобой для дальнейших инструкций.",
+                            )
+                except Exception as e:
+                    logger.warning("retry_user_notification_failed", task_id=task_id, error=str(e))
+                    
+        except PlanfixError as e:
+            if e.is_task_not_found():
+                # Task still not found, will retry later
+                logger.debug("retry_task_still_not_found", task_id=task_id)
+            else:
+                # Other error, log it
+                logger.warning("retry_executor_assignment_failed", task_id=task_id, error=str(e))
+        except Exception as e:
+            logger.error("retry_executor_assignment_error", task_id=task_id, error=str(e))
 
 
 def shutdown_scheduler() -> None:

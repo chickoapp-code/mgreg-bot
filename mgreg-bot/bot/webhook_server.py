@@ -351,8 +351,15 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Check if executor already assigned
     try:
         task_assignees = await planfix_client.get_task(int(task_id), fields="id,assignees")
-        assignees = task_assignees.get("assignees", [])
-        if assignees:
+        assignees = task_assignees.get("assignees", {})
+        # Handle both formats: object with "users" field or list
+        if isinstance(assignees, dict):
+            users = assignees.get("users", [])
+        elif isinstance(assignees, list):
+            users = assignees
+        else:
+            users = []
+        if users:
             logger.info("planfix_task_already_assigned", task_id=task_id)
             return
     except PlanfixError as e:
