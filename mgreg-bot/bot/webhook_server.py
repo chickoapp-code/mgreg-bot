@@ -351,13 +351,9 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         logger.info("guests_extracted_fallback", invited_guests=invited_guests, count=len(invited_guests))
 
     # Save task to database
-    # Convert task_number to int for database storage (assuming task number is numeric)
-    # If task_number is a string that can't be converted, we'll store it as-is (SQLite will handle it)
-    try:
-        task_id_db = int(task_number)
-    except (ValueError, TypeError):
-        # If task_number is not numeric, use as string (will need to change DB schema to TEXT)
-        task_id_db = task_number
+    # Store task_number as-is (can be string or number) - DB schema uses TEXT for task_id
+    # Convert to string for consistent storage
+    task_id_db = str(task_number) if task_number is not None else None
     
     db = get_database()
     # Normalize deadline for database storage
