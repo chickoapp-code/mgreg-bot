@@ -134,10 +134,10 @@ async def retry_executor_assignments() -> None:
         return
     
     # Find tasks with assigned_guest_id but check if executor is actually assigned in Planfix
-    # Task IDs come from Planfix webhooks - they are saved to database even if task is not yet available via API
+    # Use nomber field for API calls (task number from webhook), not task_id
     tasks = await db.fetch_all(
         """
-        SELECT task_id, assigned_guest_id 
+        SELECT task_id, nomber, assigned_guest_id 
         FROM tasks 
         WHERE assigned_guest_id IS NOT NULL
         ORDER BY created_at DESC
@@ -155,14 +155,19 @@ async def retry_executor_assignments() -> None:
     )
     
     for task_row in tasks:
-        # task_id from DB is actually task number (nomber from webhook), stored as TEXT
-        task_number = str(task_row["task_id"])  # Convert to string to use as task number
+        # Use nomber field for API calls (task number from webhook), not task_id
+        task_nomber = task_row.get("nomber")
+        if not task_nomber:
+            # Fallback to task_id if nomber is not available (for backward compatibility)
+            task_nomber = str(task_row["task_id"])
+            logger.warning("nomber_not_found_using_task_id", task_id=task_row["task_id"])
+        
         guest_planfix_id = task_row["assigned_guest_id"]
         
         try:
             # Check if executor is already assigned in Planfix
-            # Use task_number (nomber from webhook) for API calls
-            task = await planfix_client.get_task(task_number, fields="id,assignees")
+            # Use nomber (task number from webhook) for API calls
+            task = await planfix_client.get_task(task_nomber, fields="id,assignees")
             assignees = task.get("assignees", {})
             
             # Handle both formats: object with "users" field or list
@@ -189,23 +194,23 @@ async def retry_executor_assignments() -> None:
             
             if guest_assigned:
                 # Already assigned, skip
-                logger.debug("executor_already_assigned", task_number=task_number, guest_id=guest_planfix_id)
+                logger.debug("executor_already_assigned", task_nomber=task_nomber, guest_id=guest_planfix_id)
                 continue
             
             # Try to assign executor
-            logger.info("retry_executor_assignment", task_number=task_number, guest_id=guest_planfix_id)
-            await planfix_client.set_task_executors(task_number, [guest_planfix_id])
+            logger.info("retry_executor_assignment", task_nomber=task_nomber, guest_id=guest_planfix_id)
+            await planfix_client.set_task_executors(task_nomber, [guest_planfix_id])
             
             # Try to add comment
             try:
                 await planfix_client.add_task_comment(
-                    task_number,
+                    task_nomber,
                     f"✅ Гость (ID: {guest_planfix_id}) принял приглашение и назначен исполнителем.",
                 )
             except PlanfixError as comment_error:
-                logger.warning("retry_comment_add_failed", task_number=task_number, error=str(comment_error))
+                logger.warning("retry_comment_add_failed", task_nomber=task_nomber, error=str(comment_error))
             
-            logger.info("retry_executor_assignment_success", task_number=task_number, guest_id=guest_planfix_id)
+            logger.info("retry_executor_assignment_success", task_nomber=task_nomber, guest_id=guest_planfix_id)
             
             # Notify user via Telegram if bot instance is available
             from bot.webhook_server import bot_instance
@@ -220,11 +225,8 @@ async def retry_executor_assignments() -> None:
                         telegram_id = guest_mapping["telegram_id"]
                         # Try to get WebApp URL
                         from bot.handlers.invitations import generate_webapp_url
-                        # Convert task_number to int for generate_webapp_url (it expects task_id)
-                        try:
-                            task_id_for_webapp = int(task_number)
-                        except (ValueError, TypeError):
-                            task_id_for_webapp = task_number
+                        # Use task_id from DB for webapp (it expects task_id, not nomber)
+                        task_id_for_webapp = task_row["task_id"]
                         webapp_url = await generate_webapp_url(task_id_for_webapp, guest_planfix_id, settings, client=planfix_client)
                         
                         if webapp_url:
@@ -250,22 +252,22 @@ async def retry_executor_assignments() -> None:
                                 "✅ Отлично! Ты теперь назначен(а) исполнителем задачи. Свяжемся с тобой для дальнейших инструкций.",
                             )
                 except Exception as e:
-                    logger.warning("retry_user_notification_failed", task_number=task_number, error=str(e))
+                    logger.warning("retry_user_notification_failed", task_nomber=task_nomber, error=str(e))
                     
         except PlanfixError as e:
             if e.is_task_not_found():
                 # Task still not found, will retry later
-                # This is normal - task number comes from webhook, but task may not be available via REST API yet
+                # This is normal - task nomber comes from webhook, but task may not be available via REST API yet
                 logger.debug(
                     "retry_task_still_not_found",
-                    task_number=task_number,
-                    note="Task number from webhook, but task not yet available via REST API. Will retry."
+                    task_nomber=task_nomber,
+                    note="Task nomber from webhook, but task not yet available via REST API. Will retry."
                 )
             else:
                 # Other error, log it
-                logger.warning("retry_executor_assignment_failed", task_number=task_number, error=str(e))
+                logger.warning("retry_executor_assignment_failed", task_nomber=task_nomber, error=str(e))
         except Exception as e:
-            logger.error("retry_executor_assignment_error", task_number=task_number, error=str(e))
+            logger.error("retry_executor_assignment_error", task_nomber=task_nomber, error=str(e))
 
 
 def shutdown_scheduler() -> None:

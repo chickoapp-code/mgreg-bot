@@ -65,6 +65,19 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
 
     guest_planfix_id = guest_mapping["planfix_contact_id"]
 
+    # Get nomber (task number) from database for API calls
+    task_row = await db.fetch_one(
+        "SELECT nomber FROM tasks WHERE task_id = ?",
+        (task_id,),
+    )
+    task_nomber = None
+    if task_row and task_row.get("nomber"):
+        task_nomber = str(task_row["nomber"])
+    else:
+        # Fallback to task_id if nomber is not available (for backward compatibility)
+        task_nomber = str(task_id)
+        logger.warning("nomber_not_found_using_task_id", task_id=task_id)
+
     # Concurrent lock
     lock = get_lock(task_id)
     async with lock:
@@ -73,7 +86,8 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
         # we continue anyway as the task might have been created by automation and not yet available via API
         task = None
         try:
-            task = await client.get_task(task_id, fields="id,assignees")
+            # Use nomber (task number) for API calls, not task_id
+            task = await client.get_task(task_nomber, fields="id,assignees")
             assignees = task.get("assignees", {})
             # Handle both formats: object with "users" field or list
             if isinstance(assignees, dict):
@@ -89,33 +103,34 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 return
         except PlanfixError as e:
             # Log error but continue - task might not be available via API yet (created by automation)
-            logger.warning("planfix_task_check_failed", task_id=task_id, error=str(e), message="Continuing anyway")
+            logger.warning("planfix_task_check_failed", task_nomber=task_nomber, task_id=task_id, error=str(e), message="Continuing anyway")
             # Don't return - allow assignment to proceed
 
-        # Assign executor
+        # Assign executor using nomber (task number)
         assignment_success = False
         try:
-            await client.set_task_executors(task_id, [guest_planfix_id])
+            await client.set_task_executors(task_nomber, [guest_planfix_id])
             assignment_success = True
             # Try to add comment (may fail if task not found, but that's ok)
             try:
                 await client.add_task_comment(
-                    task_id,
+                    task_nomber,
                     f"✅ Гость (ID: {guest_planfix_id}) принял приглашение и назначен исполнителем.",
                 )
             except PlanfixError as comment_error:
-                logger.warning("planfix_comment_add_failed_after_assignment", task_id=task_id, error=str(comment_error))
+                logger.warning("planfix_comment_add_failed_after_assignment", task_nomber=task_nomber, error=str(comment_error))
         except PlanfixError as e:
             # Check if task not found error
             if e.is_task_not_found():
                 logger.warning(
                     "planfix_executor_assignment_failed_task_not_found",
+                    task_nomber=task_nomber,
                     task_id=task_id,
                     error=str(e),
                     status_code=e.status_code,
                     body=e.body,
-                    message="Task ID from webhook, but task not yet available via REST API. Will retry automatically.",
-                    note="Task ID was received from Planfix webhook. Background job will retry assignment when task becomes available."
+                    message="Task nomber from webhook, but task not yet available via REST API. Will retry automatically.",
+                    note="Task nomber was received from Planfix webhook. Background job will retry assignment when task becomes available."
                 )
                 # Task not available via API yet (created by automation), but we'll update DB
                 assignment_success = False
@@ -237,7 +252,17 @@ async def handle_decline(callback: CallbackQuery, bot_data: dict) -> None:
                     admin_chat_id,
                     f"⚠️ Все гости отказались от проверки задачи #{task_id}.",
                 )
-                await client.add_task_comment(task_id, "⚠️ Все приглашённые гости отказались от проверки.")
+                # Get nomber from database for API call
+                task_row = await db.fetch_one(
+                    "SELECT nomber FROM tasks WHERE task_id = ?",
+                    (task_id,),
+                )
+                task_nomber = None
+                if task_row and task_row.get("nomber"):
+                    task_nomber = str(task_row["nomber"])
+                else:
+                    task_nomber = str(task_id)
+                await client.add_task_comment(task_nomber, "⚠️ Все приглашённые гости отказались от проверки.")
             except Exception as e:
                 logger.error("admin_notification_failed", error=str(e))
 
@@ -319,7 +344,22 @@ async def generate_webapp_url(task_id: int, guest_id: int, settings, client: Pla
     form = "resto_a"
     if client:
         try:
-            task = await client.get_task(task_id, fields="id,name,description,customFieldData")
+            # Get nomber from database for API call
+            from bot.database import get_database
+            db = get_database()
+            task_row = await db.fetch_one(
+                "SELECT nomber FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            task_nomber = None
+            if task_row and task_row.get("nomber"):
+                task_nomber = str(task_row["nomber"])
+            else:
+                # Fallback to task_id if nomber is not available
+                task_nomber = str(task_id)
+            
+            # Use nomber (task number) for API call
+            task = await client.get_task(task_nomber, fields="id,name,description,customFieldData")
             # Check custom fields or task name to determine form type
             task_name = task.get("name", "").lower()
             if "доставка" in task_name or "delivery" in task_name:

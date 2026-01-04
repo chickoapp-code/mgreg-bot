@@ -24,6 +24,7 @@ class Database:
             await db.execute("""
                 CREATE TABLE IF NOT EXISTS tasks (
                     task_id INTEGER PRIMARY KEY,
+                    nomber TEXT,
                     restaurant_name TEXT NOT NULL,
                     restaurant_address TEXT,
                     visit_date TEXT,
@@ -33,6 +34,13 @@ class Database:
                     created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
                 )
             """)
+            
+            # Add nomber column if it doesn't exist (migration for existing databases)
+            try:
+                await db.execute("ALTER TABLE tasks ADD COLUMN nomber TEXT")
+            except Exception:
+                # Column already exists, ignore
+                pass
 
             # Invitations table
             await db.execute("""

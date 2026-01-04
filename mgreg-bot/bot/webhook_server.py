@@ -105,6 +105,48 @@ def get_task_number_from_webhook(data: Dict[str, Any]) -> str | int | None:
     return data.get("nomber") or data.get("taskId") or data.get("task", {}).get("id")
 
 
+async def get_task_nomber_from_db(task_id: int | str) -> str | None:
+    """Get nomber (task number) from database by task_id.
+    
+    Returns nomber if found, None otherwise.
+    """
+    db = get_database()
+    task_row = await db.fetch_one(
+        "SELECT nomber FROM tasks WHERE task_id = ?",
+        (task_id,),
+    )
+    if task_row and task_row.get("nomber"):
+        return str(task_row["nomber"])
+    return None
+
+
+async def get_task_nomber_for_api(task_id: int | str, webhook_data: Dict[str, Any] | None = None) -> str:
+    """Get nomber (task number) for API calls.
+    
+    First tries to get from webhook data, then from database, then falls back to task_id.
+    
+    Args:
+        task_id: Task ID from webhook or database
+        webhook_data: Optional webhook data to extract nomber from
+    
+    Returns:
+        Task nomber (number) to use for API calls
+    """
+    # Try webhook data first
+    if webhook_data:
+        nomber = webhook_data.get("nomber")
+        if nomber:
+            return str(nomber)
+    
+    # Try database
+    nomber = await get_task_nomber_from_db(task_id)
+    if nomber:
+        return nomber
+    
+    # Fallback to task_id
+    return str(task_id)
+
+
 def verify_yforms_signature(body: bytes, signature: Optional[str]) -> bool:
     """Verify Yandex Forms webhook signature."""
     if not signature:
@@ -252,27 +294,27 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     """
     logger.info("handle_task_created_started", data_keys=list(data.keys()) if isinstance(data, dict) else None)
     
-    # Use nomber (task number) from webhook instead of task_id
-    # Task number comes from Planfix webhook - Planfix sends this number when task is created
-    task_number = get_task_number_from_webhook(data)
-    if not task_number:
+    # Extract nomber (task number) from webhook - this is used for API calls
+    # nomber is the actual task number (e.g., "86190"), not the task ID (e.g., "17859014")
+    task_nomber = data.get("nomber")
+    if not task_nomber:
         # Avoid passing data dict directly to prevent event key conflict
         data_str = str(data) if data else "None"
-        logger.error("planfix_task_created_missing_task_number", data_str=data_str)
+        logger.error("planfix_task_created_missing_nomber", data_str=data_str)
         return
     
     logger.info(
         "planfix_task_created_processing",
-        task_number=task_number,
+        task_nomber=task_nomber,
         source="webhook",
-        note="Task number (nomber) received from Planfix webhook. Task may not be immediately available via REST API."
+        note="Task nomber (number) received from Planfix webhook. This will be used for API calls. Task may not be immediately available via REST API."
     )
     template = data.get("template", "") or data.get("task", {}).get("templateName", "")
 
-    # Get full task details from Planfix
+    # Get full task details from Planfix using nomber (task number)
     try:
         task_details = await planfix_client.get_task(
-            task_number,
+            task_nomber,
             fields="id,name,description,template,dateTime,endDateTime,customFieldData",
         )
         
@@ -280,12 +322,12 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         if settings.task_template_ids_list:
             template_obj = task_details.get("template", {})
             template_id = template_obj.get("id")
-            logger.info("planfix_task_template_check", task_number=task_number, template_id=template_id, allowed_templates=settings.task_template_ids_list)
+            logger.info("planfix_task_template_check", task_nomber=task_nomber, template_id=template_id, allowed_templates=settings.task_template_ids_list)
             if template_id not in settings.task_template_ids_list:
-                logger.info("planfix_task_ignored", task_number=task_number, template_id=template_id, reason="template_not_in_allowed_list")
+                logger.info("planfix_task_ignored", task_nomber=task_nomber, template_id=template_id, reason="template_not_in_allowed_list")
                 return
         else:
-            logger.info("planfix_task_template_check_skipped", task_number=task_number, reason="task_template_ids_list_not_configured")
+            logger.info("planfix_task_template_check_skipped", task_nomber=task_nomber, reason="task_template_ids_list_not_configured")
         
         # Extract data from task or webhook payload (webhook takes precedence for specific fields)
         # Support both old format (restaurant) and new format (task.restaurant)
@@ -324,7 +366,7 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
                     invited_guests.append(int(g))
         logger.info("guests_extracted", invited_guests=invited_guests, count=len(invited_guests))
     except PlanfixError as e:
-        logger.error("planfix_task_details_fetch_error", task_number=task_number, error=str(e))
+        logger.error("planfix_task_details_fetch_error", task_nomber=task_nomber, error=str(e))
         # Fallback to webhook data only
         restaurant = data.get("restaurant", {})
         restaurant_name = restaurant.get("name", "")
@@ -351,9 +393,19 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         logger.info("guests_extracted_fallback", invited_guests=invited_guests, count=len(invited_guests))
 
     # Save task to database
-    # Store task_number as-is (can be string or number) - DB schema uses TEXT for task_id
-    # Convert to string for consistent storage
-    task_id_db = str(task_number) if task_number is not None else None
+    # Extract both task_id (id) and nomber from webhook
+    # task_id = id from webhook (e.g., "17859014") - stored in task_id column
+    # nomber = nomber from webhook (e.g., "86190") - stored in nomber column, used for API calls
+    task_id_from_webhook = data.get("taskId") or data.get("task", {}).get("id")
+    
+    # Convert to appropriate types for database
+    try:
+        task_id_db = int(task_id_from_webhook) if task_id_from_webhook else None
+    except (ValueError, TypeError):
+        task_id_db = task_id_from_webhook
+    
+    # nomber is stored as TEXT (already extracted above)
+    nomber_db = str(task_nomber) if task_nomber else None
     
     db = get_database()
     # Normalize deadline for database storage
@@ -361,15 +413,15 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     await db.execute(
         """
         INSERT OR REPLACE INTO tasks 
-        (task_id, restaurant_name, restaurant_address, visit_date, deadline, status, created_at)
-        VALUES (?, ?, ?, ?, ?, ?, ?)
+        (task_id, nomber, restaurant_name, restaurant_address, visit_date, deadline, status, created_at)
+        VALUES (?, ?, ?, ?, ?, ?, ?, ?)
         """,
-        (task_id_db, restaurant_name, restaurant_address, visit_date, normalized_deadline, "pending", datetime.now().isoformat()),
+        (task_id_db, nomber_db, restaurant_name, restaurant_address, visit_date, normalized_deadline, "pending", datetime.now().isoformat()),
     )
 
-    # Check if executor already assigned
+    # Check if executor already assigned using nomber (task number)
     try:
-        task_assignees = await planfix_client.get_task(task_number, fields="id,assignees")
+        task_assignees = await planfix_client.get_task(task_nomber, fields="id,assignees")
         assignees = task_assignees.get("assignees", {})
         # Handle both formats: object with "users" field or list
         if isinstance(assignees, dict):
@@ -379,13 +431,13 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         else:
             users = []
         if users:
-            logger.info("planfix_task_already_assigned", task_number=task_number)
+            logger.info("planfix_task_already_assigned", task_nomber=task_nomber)
             return
     except PlanfixError as e:
-        logger.error("planfix_task_assignees_check_failed", task_number=task_number, error=str(e))
+        logger.error("planfix_task_assignees_check_failed", task_nomber=task_nomber, error=str(e))
         # Continue anyway - will check again when guest accepts
 
-    # Send invitations (using task_number, but send_invitations expects task_id)
+    # Send invitations (using task_id for internal reference)
     await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date)
 
     # Schedule deadline check
@@ -395,14 +447,14 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         if normalized_deadline:
             await schedule_deadline_check(task_id_db, normalized_deadline, planfix_client)
 
-    # Log in Planfix
+    # Log in Planfix using nomber (task number)
     try:
         await planfix_client.add_task_comment(
-            task_number,
+            task_nomber,
             f"✅ Задача создана. Отправлено приглашений: {len(invited_guests)}",
         )
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_number=task_number, error=str(e))
+        logger.error("planfix_comment_add_failed", task_nomber=task_nomber, error=str(e))
 
 
 async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
@@ -488,13 +540,15 @@ async def handle_task_wait_form(data: Dict[str, Any]) -> None:
             await schedule_deadline_check(int(task_id), normalized_deadline, planfix_client)
     
     # Optional: Add informational comment (automation may not add comment)
+    # Use nomber (task number) for API call
     try:
+        task_nomber = await get_task_nomber_for_api(task_id, data)
         await planfix_client.add_task_comment(
-            int(task_id),
+            task_nomber,
             f"⏳ Ожидаем заполнение анкеты. Дедлайн: {deadline or 'не указан'}",
         )
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_comment_add_failed", task_id=task_id, task_nomber=task_nomber if 'task_nomber' in locals() else None, error=str(e))
 
 
 async def handle_task_deadline_failed(data: Dict[str, Any]) -> None:
@@ -641,10 +695,12 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
         if status:
             comment_text += f" Статус возмещения: {status}."
     
+    # Use nomber (task number) for API call
     try:
-        await planfix_client.add_task_comment(int(task_id), comment_text)
+        task_nomber = await get_task_nomber_for_api(task_id, data)
+        await planfix_client.add_task_comment(task_nomber, comment_text)
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_comment_add_failed", task_id=task_id, task_nomber=task_nomber if 'task_nomber' in locals() else None, error=str(e))
     
     # Notify admin
     if bot_instance and settings.admin_chat_id:
@@ -821,8 +877,12 @@ async def webapp_start(
         raise HTTPException(status_code=404, detail=f"Form {form} not found")
 
     # Get task details for display
+    # Use nomber from database if available, otherwise use taskId
     try:
-        task = await planfix_client.get_task(taskId, fields="id,name,description,endDateTime")
+        task_nomber = await get_task_nomber_from_db(taskId)
+        if not task_nomber:
+            task_nomber = str(taskId)
+        task = await planfix_client.get_task(task_nomber, fields="id,name,description,endDateTime")
         task_name = task.get("name", f"Задача #{taskId}")
         # Extract deadline for display
         end_dt = task.get("endDateTime", {})
@@ -967,13 +1027,19 @@ async def handle_form_submission(
         result_text = f"Оценка: {score}\n{summary}" if score else summary
         custom_field_data.append({"field": {"id": settings.result_field_id}, "value": result_text})
 
+    # Get nomber from database for API calls
+    task_nomber = await get_task_nomber_from_db(task_id)
+    if not task_nomber:
+        task_nomber = str(task_id)
+    
     # Upload files if any
     file_ids = []
     for attachment in attachments:
         file_url = attachment.get("url")
         if file_url:
             try:
-                file_result = await planfix_client.upload_file_from_url(int(task_id), file_url)
+                # Use nomber (task number) for API call
+                file_result = await planfix_client.upload_file_from_url(task_nomber, file_url)
                 file_id = file_result.get("id") or file_result.get("file", {}).get("id")
                 if file_id:
                     file_ids.append(file_id)
@@ -987,27 +1053,29 @@ async def handle_form_submission(
         )
 
     # Update task
+    
     if custom_field_data:
         try:
-            await planfix_client.update_task(int(task_id), custom_field_data=custom_field_data)
+            await planfix_client.update_task(task_nomber, custom_field_data=custom_field_data)
         except PlanfixError as e:
-            logger.error("planfix_task_update_failed", task_id=task_id, error=str(e))
+            logger.error("planfix_task_update_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
 
     # Change status to "Done"
     if settings.status_done_id:
         try:
-            await planfix_client.update_task(int(task_id), status=settings.status_done_id)
+            await planfix_client.update_task(task_nomber, status=settings.status_done_id)
         except PlanfixError as e:
-            logger.error("planfix_status_update_failed", task_id=task_id, error=str(e))
+            logger.error("planfix_status_update_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
 
     # Add comment
     comment_text = f"✅ Анкета получена от гостя (ID: {guest_id}). Форма: {form}."
     if score:
         comment_text += f" Оценка: {score}."
+    # Use nomber (task number) for API call
     try:
-        await planfix_client.add_task_comment(int(task_id), comment_text)
+        await planfix_client.add_task_comment(task_nomber, comment_text)
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_comment_add_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
 
     # Notify admin
     if bot_instance and settings.admin_chat_id:
