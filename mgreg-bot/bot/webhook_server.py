@@ -1013,16 +1013,27 @@ async def yforms_webhook(
             guest_id = params.get("guestId")
             # Support both old format (form) and new format (formCode)
             form = params.get("form") or params.get("formCode")
-            result = params.get("result", {})
+            result_raw = params.get("result", {})
+            # Handle case when result is a number (score) or string instead of object
+            if isinstance(result_raw, (int, float, str)):
+                result = {"score": result_raw if isinstance(result_raw, (int, float)) else None}
+            elif isinstance(result_raw, dict):
+                result = result_raw
+            else:
+                result = {}
             attachments = params.get("attachments", [])
+            if not isinstance(attachments, list):
+                attachments = []
             
             logger.info(
                 "yforms_jsonrpc_received",
                 method=data.get("method"),
                 params_keys=list(params.keys()) if params else [],
-                params_preview=str(params)[:500] if params else None,
+                params_full=params,
                 session_id=session_id,
                 task_id=task_id,
+                guest_id=guest_id,
+                form=form,
             )
         else:
             # Handle direct format (legacy or alternative)
@@ -1031,12 +1042,39 @@ async def yforms_webhook(
             guest_id = data.get("guestId")
             # Support both old format (form) and new format (formCode)
             form = data.get("form") or data.get("formCode")
-            result = data.get("result", {})
+            result_raw = data.get("result", {})
+            # Handle case when result is a number (score) or string instead of object
+            if isinstance(result_raw, (int, float, str)):
+                result = {"score": result_raw if isinstance(result_raw, (int, float)) else None}
+            elif isinstance(result_raw, dict):
+                result = result_raw
+            else:
+                result = {}
             attachments = data.get("attachments", [])
+            if not isinstance(attachments, list):
+                attachments = []
 
+        # Convert task_id to int if it's a string
+        if task_id and isinstance(task_id, str):
+            try:
+                task_id = int(task_id)
+            except (ValueError, TypeError):
+                logger.warning("yforms_invalid_task_id", task_id=task_id, task_id_type=type(task_id).__name__)
+        
+        # Convert guest_id to int if it's a string
+        if guest_id and isinstance(guest_id, str):
+            try:
+                guest_id = int(guest_id)
+            except (ValueError, TypeError):
+                logger.warning("yforms_invalid_guest_id", guest_id=guest_id, guest_id_type=type(guest_id).__name__)
+        
         if not session_id or not task_id:
             logger.warning(
                 "yforms_missing_fields",
+                session_id=session_id,
+                task_id=task_id,
+                session_id_type=type(session_id).__name__ if session_id else None,
+                task_id_type=type(task_id).__name__ if task_id else None,
                 data_keys=list(data.keys()) if isinstance(data, dict) else [],
                 params_keys=list(data.get("params", {}).keys()) if isinstance(data.get("params"), dict) else [],
                 data_preview=str(data)[:500],
