@@ -494,13 +494,15 @@ async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
     )
     
     # Optional: Add informational comment (automation may not add comment)
+    # Use nomber (task number) for API call
     try:
+        task_nomber = await get_task_nomber_for_api(task_id, data)
         await planfix_client.add_task_comment(
-            int(task_id),
+            task_nomber,
             f"✅ Исполнитель назначен вручную: контакт ID {guest_id}",
         )
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_comment_add_failed", task_id=task_id, task_nomber=task_nomber if 'task_nomber' in locals() else None, error=str(e))
 
 
 async def handle_task_wait_form(data: Dict[str, Any]) -> None:
@@ -848,7 +850,8 @@ async def send_invitations(
             logger.error("admin_not_found_guests_notification_failed", error=str(e))
 
 
-@app.get("/webapp/start")
+@app.get("/webhooks/planfix-guest/webapp/start")
+@app.get("/webapp/start")  # Backward compatibility
 async def webapp_start(
     taskId: int,
     guestId: int,
