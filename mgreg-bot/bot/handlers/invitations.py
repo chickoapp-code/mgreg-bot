@@ -114,7 +114,8 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                     error=str(e),
                     status_code=e.status_code,
                     body=e.body,
-                    message="Task may not be available via API yet, will update DB anyway"
+                    message="Task ID from webhook, but task not yet available via REST API. Will retry automatically.",
+                    note="Task ID was received from Planfix webhook. Background job will retry assignment when task becomes available."
                 )
                 # Task not available via API yet (created by automation), but we'll update DB
                 assignment_success = False

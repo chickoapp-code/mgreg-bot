@@ -181,26 +181,31 @@ class PlanfixClient:
             return await self.update_contact(contact_id, payload)
         return await self.create_contact(payload)
 
-    async def get_task(self, task_id: int, fields: Optional[str] = None) -> Dict[str, Any]:
-        """Get task by ID."""
-        logger.info("planfix_task_get", task_id=task_id)
+    async def get_task(self, task_number: str | int, fields: Optional[str] = None) -> Dict[str, Any]:
+        """Get task by number (nomber from webhook).
+        
+        Args:
+            task_number: Task number from Planfix webhook (can be string or int)
+            fields: Optional fields to retrieve
+        """
+        logger.info("planfix_task_get", task_number=task_number)
         params = {}
         if fields:
             params["fields"] = fields
-        response = await self._request("GET", f"task/{task_id}", params=params)
+        response = await self._request("GET", f"task/{task_number}", params=params)
         return response.get("task", response)
 
     async def update_task(
         self,
-        task_id: int,
+        task_number: str | int,
         *,
         status: Optional[int] = None,
         custom_field_data: Optional[list[Dict[str, Any]]] = None,
         assignees: Optional[Dict[str, Any]] = None,
         silent: bool = False,
     ) -> Dict[str, Any]:
-        """Update task."""
-        logger.info("planfix_task_update", task_id=task_id, status=status)
+        """Update task by number."""
+        logger.info("planfix_task_update", task_number=task_number, status=status)
         payload: Dict[str, Any] = {}
         if status is not None:
             payload["status"] = {"id": status}
@@ -213,35 +218,35 @@ class PlanfixClient:
         if silent:
             params["silent"] = "true"
 
-        response = await self._request("POST", f"task/{task_id}", json=payload, params=params)
+        response = await self._request("POST", f"task/{task_number}", json=payload, params=params)
         return response
 
     async def add_task_comment(
         self,
-        task_id: int,
+        task_number: str | int,
         text: str,
         *,
         silent: bool = False,
     ) -> Dict[str, Any]:
-        """Add comment to task."""
-        logger.info("planfix_task_comment_add", task_id=task_id)
+        """Add comment to task by number."""
+        logger.info("planfix_task_comment_add", task_number=task_number)
         # Planfix API expects "description" field, not "text"
         payload = {"description": text}
         params = {}
         if silent:
             params["silent"] = "true"
-        response = await self._request("POST", f"task/{task_id}/comments/", json=payload, params=params)
+        response = await self._request("POST", f"task/{task_number}/comments/", json=payload, params=params)
         return response
 
     async def upload_file_to_task(
         self,
-        task_id: int,
+        task_number: str | int,
         file_path: str,
         *,
         description: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Upload file to task."""
-        logger.info("planfix_task_file_upload", task_id=task_id, file_path=file_path)
+        """Upload file to task by number."""
+        logger.info("planfix_task_file_upload", task_number=task_number, file_path=file_path)
         # Read file and upload
         import aiofiles
         async with aiofiles.open(file_path, "rb") as f:
@@ -255,7 +260,7 @@ class PlanfixClient:
             headers = {"Authorization": f"Bearer {self._token}"}
             async with httpx.AsyncClient() as client:
                 response = await client.post(
-                    f"{self._base_url}task/{task_id}/files",
+                    f"{self._base_url}task/{task_number}/files",
                     headers=headers,
                     files=files,
                     data=data,
@@ -271,27 +276,27 @@ class PlanfixClient:
 
     async def upload_file_from_url(
         self,
-        task_id: int,
+        task_number: str | int,
         file_url: str,
         *,
         description: Optional[str] = None,
     ) -> Dict[str, Any]:
-        """Upload file to task from URL."""
-        logger.info("planfix_task_file_upload_url", task_id=task_id, file_url=file_url)
+        """Upload file to task from URL by task number."""
+        logger.info("planfix_task_file_upload_url", task_number=task_number, file_url=file_url)
         payload: Dict[str, Any] = {"url": file_url}
         if description:
             payload["description"] = description
-        response = await self._request("POST", f"task/{task_id}/files/from-url", json=payload)
+        response = await self._request("POST", f"task/{task_number}/files/from-url", json=payload)
         return response
 
     async def set_task_executors(
         self,
-        task_id: int,
+        task_number: str | int,
         executor_contact_ids: list[int],
         *,
         silent: bool = False,
     ) -> Dict[str, Any]:
-        """Set task executors (assignees).
+        """Set task executors (assignees) by task number.
         
         According to Planfix API, assignees should be in format:
         {
@@ -299,13 +304,13 @@ class PlanfixClient:
           "groups": [...]
         }
         """
-        logger.info("planfix_task_set_executors", task_id=task_id, executors=executor_contact_ids)
+        logger.info("planfix_task_set_executors", task_number=task_number, executors=executor_contact_ids)
         # Planfix API expects assignees as object with "users" array
         # Contact IDs should be formatted as "contact:ID" or just ID as integer
         assignees = {
             "users": [{"id": f"contact:{cid}"} for cid in executor_contact_ids]
         }
-        return await self.update_task(task_id, assignees=assignees, silent=silent)
+        return await self.update_task(task_number, assignees=assignees, silent=silent)
 
     async def get_contact(self, contact_id: int) -> Dict[str, Any]:
         """Get contact by ID."""

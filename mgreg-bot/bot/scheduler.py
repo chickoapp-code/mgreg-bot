@@ -118,7 +118,13 @@ def start_scheduler() -> None:
 
 
 async def retry_executor_assignments() -> None:
-    """Retry executor assignments for tasks that were reserved but executor not yet assigned in Planfix."""
+    """Retry executor assignments for tasks that were reserved but executor not yet assigned in Planfix.
+    
+    This function handles cases where:
+    1. User accepted invitation, but task was not yet available via Planfix REST API
+    2. Task ID was received from Planfix webhook and saved to database
+    3. Task becomes available later, and we need to assign executor
+    """
     db = get_database()
     
     # Get planfix_client from webhook_server
@@ -128,6 +134,7 @@ async def retry_executor_assignments() -> None:
         return
     
     # Find tasks with assigned_guest_id but check if executor is actually assigned in Planfix
+    # Task IDs come from Planfix webhooks - they are saved to database even if task is not yet available via API
     tasks = await db.fetch_all(
         """
         SELECT task_id, assigned_guest_id 
@@ -141,7 +148,11 @@ async def retry_executor_assignments() -> None:
     if not tasks:
         return
     
-    logger.info("retry_executor_assignments_started", count=len(tasks))
+    logger.info(
+        "retry_executor_assignments_started",
+        count=len(tasks),
+        note="Checking tasks with assigned_guest_id. Task IDs come from Planfix webhooks."
+    )
     
     for task_row in tasks:
         task_id = task_row["task_id"]
@@ -237,7 +248,12 @@ async def retry_executor_assignments() -> None:
         except PlanfixError as e:
             if e.is_task_not_found():
                 # Task still not found, will retry later
-                logger.debug("retry_task_still_not_found", task_id=task_id)
+                # This is normal - task ID comes from webhook, but task may not be available via REST API yet
+                logger.debug(
+                    "retry_task_still_not_found",
+                    task_id=task_id,
+                    note="Task ID from webhook, but task not yet available via REST API. Will retry."
+                )
             else:
                 # Other error, log it
                 logger.warning("retry_executor_assignment_failed", task_id=task_id, error=str(e))

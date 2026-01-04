@@ -97,6 +97,14 @@ def verify_planfix_basic_auth(credentials: HTTPBasicCredentials) -> bool:
     )
 
 
+def get_task_number_from_webhook(data: Dict[str, Any]) -> str | int | None:
+    """Extract task number (nomber) from webhook data.
+    
+    Returns task number from 'nomber' field, or falls back to taskId/task.id for backward compatibility.
+    """
+    return data.get("nomber") or data.get("taskId") or data.get("task", {}).get("id")
+
+
 def verify_yforms_signature(body: bytes, signature: Optional[str]) -> bool:
     """Verify Yandex Forms webhook signature."""
     if not signature:
@@ -199,15 +207,16 @@ async def planfix_webhook(
         logger.info("planfix_webhook_json_parsed", data_keys=list(data.keys()) if isinstance(data, dict) else None)
         
         event = data.get("event")
-        task_id = data.get("taskId") or data.get("task", {}).get("id")
+        # Use nomber (task number) from webhook instead of task_id
+        task_number = get_task_number_from_webhook(data)
 
-        logger.info("planfix_webhook_event_extracted", event_type=event, task_id=task_id)
+        logger.info("planfix_webhook_event_extracted", event_type=event, task_number=task_number)
 
-        if not event or not task_id:
+        if not event or not task_number:
             # Avoid passing data dict directly to prevent event key conflict
             data_str = str(data) if data else "None"
-            logger.warning("planfix_webhook_missing_fields", event_type=event, task_id=task_id, full_data_str=data_str)
-            return {"status": "ok", "message": "Missing event or taskId"}
+            logger.warning("planfix_webhook_missing_fields", event_type=event, task_number=task_number, full_data_str=data_str)
+            return {"status": "ok", "message": "Missing event or task number (nomber)"}
 
         # Handle different event types according to TZ
         if event == "task.created":
@@ -227,7 +236,7 @@ async def planfix_webhook(
         elif event == "task.updated":
             await handle_task_updated(data)
         else:
-            logger.info("planfix_webhook_unknown_event", event_type=event, task_id=task_id)
+            logger.info("planfix_webhook_unknown_event", event_type=event, task_number=task_number)
 
         return {"status": "ok"}
     except Exception as e:
@@ -243,21 +252,27 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     """
     logger.info("handle_task_created_started", data_keys=list(data.keys()) if isinstance(data, dict) else None)
     
-    # Support both old format (taskId) and new format (task.id)
-    task_id = data.get("taskId") or data.get("task", {}).get("id")
-    if not task_id:
+    # Use nomber (task number) from webhook instead of task_id
+    # Task number comes from Planfix webhook - Planfix sends this number when task is created
+    task_number = get_task_number_from_webhook(data)
+    if not task_number:
         # Avoid passing data dict directly to prevent event key conflict
         data_str = str(data) if data else "None"
-        logger.error("planfix_task_created_missing_task_id", data_str=data_str)
+        logger.error("planfix_task_created_missing_task_number", data_str=data_str)
         return
     
-    logger.info("planfix_task_created_processing", task_id=task_id)
+    logger.info(
+        "planfix_task_created_processing",
+        task_number=task_number,
+        source="webhook",
+        note="Task number (nomber) received from Planfix webhook. Task may not be immediately available via REST API."
+    )
     template = data.get("template", "") or data.get("task", {}).get("templateName", "")
 
     # Get full task details from Planfix
     try:
         task_details = await planfix_client.get_task(
-            int(task_id),
+            task_number,
             fields="id,name,description,template,dateTime,endDateTime,customFieldData",
         )
         
@@ -265,12 +280,12 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         if settings.task_template_ids_list:
             template_obj = task_details.get("template", {})
             template_id = template_obj.get("id")
-            logger.info("planfix_task_template_check", task_id=task_id, template_id=template_id, allowed_templates=settings.task_template_ids_list)
+            logger.info("planfix_task_template_check", task_number=task_number, template_id=template_id, allowed_templates=settings.task_template_ids_list)
             if template_id not in settings.task_template_ids_list:
-                logger.info("planfix_task_ignored", task_id=task_id, template_id=template_id, reason="template_not_in_allowed_list")
+                logger.info("planfix_task_ignored", task_number=task_number, template_id=template_id, reason="template_not_in_allowed_list")
                 return
         else:
-            logger.info("planfix_task_template_check_skipped", task_id=task_id, reason="task_template_ids_list_not_configured")
+            logger.info("planfix_task_template_check_skipped", task_number=task_number, reason="task_template_ids_list_not_configured")
         
         # Extract data from task or webhook payload (webhook takes precedence for specific fields)
         # Support both old format (restaurant) and new format (task.restaurant)
@@ -309,7 +324,7 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
                     invited_guests.append(int(g))
         logger.info("guests_extracted", invited_guests=invited_guests, count=len(invited_guests))
     except PlanfixError as e:
-        logger.error("planfix_task_details_fetch_error", task_id=task_id, error=str(e))
+        logger.error("planfix_task_details_fetch_error", task_number=task_number, error=str(e))
         # Fallback to webhook data only
         restaurant = data.get("restaurant", {})
         restaurant_name = restaurant.get("name", "")
@@ -336,6 +351,14 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         logger.info("guests_extracted_fallback", invited_guests=invited_guests, count=len(invited_guests))
 
     # Save task to database
+    # Convert task_number to int for database storage (assuming task number is numeric)
+    # If task_number is a string that can't be converted, we'll store it as-is (SQLite will handle it)
+    try:
+        task_id_db = int(task_number)
+    except (ValueError, TypeError):
+        # If task_number is not numeric, use as string (will need to change DB schema to TEXT)
+        task_id_db = task_number
+    
     db = get_database()
     # Normalize deadline for database storage
     normalized_deadline = normalize_planfix_date(deadline) if deadline else ""
@@ -345,12 +368,12 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         (task_id, restaurant_name, restaurant_address, visit_date, deadline, status, created_at)
         VALUES (?, ?, ?, ?, ?, ?, ?)
         """,
-        (task_id, restaurant_name, restaurant_address, visit_date, normalized_deadline, "pending", datetime.now().isoformat()),
+        (task_id_db, restaurant_name, restaurant_address, visit_date, normalized_deadline, "pending", datetime.now().isoformat()),
     )
 
     # Check if executor already assigned
     try:
-        task_assignees = await planfix_client.get_task(int(task_id), fields="id,assignees")
+        task_assignees = await planfix_client.get_task(task_number, fields="id,assignees")
         assignees = task_assignees.get("assignees", {})
         # Handle both formats: object with "users" field or list
         if isinstance(assignees, dict):
@@ -360,30 +383,30 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         else:
             users = []
         if users:
-            logger.info("planfix_task_already_assigned", task_id=task_id)
+            logger.info("planfix_task_already_assigned", task_number=task_number)
             return
     except PlanfixError as e:
-        logger.error("planfix_task_assignees_check_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_task_assignees_check_failed", task_number=task_number, error=str(e))
         # Continue anyway - will check again when guest accepts
 
-    # Send invitations
-    await send_invitations(task_id, invited_guests, restaurant_name, restaurant_address, visit_date)
+    # Send invitations (using task_number, but send_invitations expects task_id)
+    await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date)
 
     # Schedule deadline check
     if deadline:
         from bot.scheduler import schedule_deadline_check
         normalized_deadline = normalize_planfix_date(deadline)
         if normalized_deadline:
-            await schedule_deadline_check(int(task_id), normalized_deadline, planfix_client)
+            await schedule_deadline_check(task_id_db, normalized_deadline, planfix_client)
 
     # Log in Planfix
     try:
         await planfix_client.add_task_comment(
-            int(task_id),
+            task_number,
             f"✅ Задача создана. Отправлено приглашений: {len(invited_guests)}",
         )
     except PlanfixError as e:
-        logger.error("planfix_comment_add_failed", task_id=task_id, error=str(e))
+        logger.error("planfix_comment_add_failed", task_number=task_number, error=str(e))
 
 
 async def handle_task_assignee_manual(data: Dict[str, Any]) -> None:
