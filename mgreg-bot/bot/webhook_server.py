@@ -1003,22 +1003,81 @@ async def yforms_webhook(
 
     try:
         data = json.loads(body)
-        session_id = data.get("sessionId")
-        task_id = data.get("taskId")
-        guest_id = data.get("guestId")
-        # Support both old format (form) and new format (formCode)
-        form = data.get("form") or data.get("formCode")
-        result = data.get("result", {})
-        attachments = data.get("attachments", [])
+        
+        # Handle JSON-RPC 2.0 format from Yandex Forms
+        if data.get("jsonrpc") == "2.0":
+            # Extract data from params
+            params = data.get("params", {})
+            session_id = params.get("sessionId")
+            task_id = params.get("taskId")
+            guest_id = params.get("guestId")
+            # Support both old format (form) and new format (formCode)
+            form = params.get("form") or params.get("formCode")
+            result = params.get("result", {})
+            attachments = params.get("attachments", [])
+            
+            logger.info(
+                "yforms_jsonrpc_received",
+                method=data.get("method"),
+                params_keys=list(params.keys()) if params else [],
+                params_preview=str(params)[:500] if params else None,
+                session_id=session_id,
+                task_id=task_id,
+            )
+        else:
+            # Handle direct format (legacy or alternative)
+            session_id = data.get("sessionId")
+            task_id = data.get("taskId")
+            guest_id = data.get("guestId")
+            # Support both old format (form) and new format (formCode)
+            form = data.get("form") or data.get("formCode")
+            result = data.get("result", {})
+            attachments = data.get("attachments", [])
 
         if not session_id or not task_id:
-            raise HTTPException(status_code=400, detail="Missing required fields")
+            logger.warning(
+                "yforms_missing_fields",
+                data_keys=list(data.keys()) if isinstance(data, dict) else [],
+                params_keys=list(data.get("params", {}).keys()) if isinstance(data.get("params"), dict) else [],
+                data_preview=str(data)[:500],
+            )
+            # Return JSON-RPC 2.0 error if request was JSON-RPC
+            if isinstance(data, dict) and data.get("jsonrpc") == "2.0":
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32602, "message": "Missing required fields: sessionId and taskId"},
+                    "id": data.get("id"),
+                }
+            raise HTTPException(status_code=400, detail="Missing required fields: sessionId and taskId")
 
         await handle_form_submission(session_id, task_id, guest_id, form, result, attachments)
 
+        # Return JSON-RPC 2.0 response if request was JSON-RPC
+        if data.get("jsonrpc") == "2.0":
+            return {
+                "jsonrpc": "2.0",
+                "result": {"status": "ok"},
+                "id": data.get("id"),
+            }
         return {"status": "ok"}
+    except HTTPException:
+        raise
+    except json.JSONDecodeError as e:
+        logger.error("yforms_webhook_json_decode_error", error=str(e), body_preview=body[:500].decode('utf-8', errors='ignore'))
+        raise HTTPException(status_code=400, detail="Invalid JSON")
     except Exception as e:
-        logger.error("yforms_webhook_error", error=str(e))
+        logger.error("yforms_webhook_error", error=str(e), exc_info=True)
+        # Try to return JSON-RPC 2.0 error if request was JSON-RPC
+        try:
+            parsed_data = json.loads(body)
+            if isinstance(parsed_data, dict) and parsed_data.get("jsonrpc") == "2.0":
+                return {
+                    "jsonrpc": "2.0",
+                    "error": {"code": -32000, "message": str(e)},
+                    "id": parsed_data.get("id"),
+                }
+        except:
+            pass
         raise HTTPException(status_code=500, detail=str(e))
 
 
