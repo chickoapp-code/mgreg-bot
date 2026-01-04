@@ -37,3 +37,6 @@ echo ""
 echo "  tmux ls       # список сессий"
 echo "  tmux attach -t <session>  # подключиться и остановить (Ctrl+C)"
 
+
+
+
