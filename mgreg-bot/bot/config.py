@@ -33,6 +33,13 @@ class Settings(BaseSettings):
     status_cancelled_id: Optional[int] = Field(default=None, alias="STATUS_CANCELLED_ID")
     result_field_id: Optional[int] = Field(default=None, alias="RESULT_FIELD_ID")
     result_files_field_id: Optional[int] = Field(default=None, alias="RESULT_FILES_FIELD_ID")
+    # Custom fields for guest assignment
+    guest_field_id: Optional[int] = Field(default=None, alias="GUEST_FIELD_ID")
+    assignment_source_field_id: Optional[int] = Field(default=None, alias="ASSIGNMENT_SOURCE_FIELD_ID")
+    # Custom fields for form results
+    score_field_id: Optional[int] = Field(default=None, alias="SCORE_FIELD_ID")
+    result_status_field_id: Optional[int] = Field(default=None, alias="RESULT_STATUS_FIELD_ID")
+    session_id_field_id: Optional[int] = Field(default=None, alias="SESSION_ID_FIELD_ID")
 
     # Server configuration
     webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")

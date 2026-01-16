@@ -112,11 +112,26 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
             logger.warning("planfix_task_check_failed", task_nomber=task_nomber, task_id=task_id, error=str(e), message="Continuing anyway")
             # Don't return - allow assignment to proceed
 
+        # Prepare custom fields for assignment
+        custom_field_data = []
+        if settings.guest_field_id:
+            custom_field_data.append({"field": {"id": settings.guest_field_id}, "value": str(guest_planfix_id)})
+        if settings.assignment_source_field_id:
+            custom_field_data.append({"field": {"id": settings.assignment_source_field_id}, "value": "Telegram Bot"})
+        
         # Assign executor using nomber (task number)
         assignment_success = False
         try:
             await client.set_task_executors(task_nomber, [guest_planfix_id])
             assignment_success = True
+            
+            # Update custom fields if any
+            if custom_field_data:
+                try:
+                    await client.update_task(task_nomber, custom_field_data=custom_field_data)
+                except PlanfixError as field_error:
+                    logger.warning("planfix_custom_fields_update_failed", task_nomber=task_nomber, error=str(field_error))
+            
             # Try to add comment (may fail if task not found, but that's ok)
             try:
                 await client.add_task_comment(

@@ -1174,6 +1174,12 @@ async def handle_form_submission(
     if settings.result_field_id:
         result_text = f"Оценка: {score}\n{summary}" if score else summary
         custom_field_data.append({"field": {"id": settings.result_field_id}, "value": result_text})
+    if settings.score_field_id and score:
+        custom_field_data.append({"field": {"id": settings.score_field_id}, "value": str(score)})
+    if settings.result_status_field_id:
+        custom_field_data.append({"field": {"id": settings.result_status_field_id}, "value": "Завершено"})
+    if settings.session_id_field_id:
+        custom_field_data.append({"field": {"id": settings.session_id_field_id}, "value": session_id})
 
     # Get nomber from database for API calls
     task_nomber = await get_task_nomber_from_db(task_id)
