@@ -17,21 +17,28 @@ python get_task_template_fields.py
 
 **Требования:**
 - Должен быть настроен `.env` файл с `PLANFIX_TOKEN` и `PLANFIX_BASE_URL`
-- Опционально: укажите `PLANFIX_TASK_TEMPLATE_IDS` для фильтрации шаблонов
+- Опционально: `PLANFIX_TASK_TEMPLATE_IDS` для фильтрации шаблонов
+- Опционально: `PLANFIX_TASK_NUMBER` — номер задачи для получения полей через `/customfield/task/{id}` (если `/customfield/task` вернёт пусто)
+
+**Важно:** Planfix API возвращает `customfields` (lowercase), а не `customFields`.
 
 ## Способ 2: Через Planfix API напрямую
 
-### Вариант A: Получить все кастомные поля задач
+### Вариант A: Получить все кастомные поля задач (GET /customfield/task)
 
 ```bash
 curl -X GET "https://your-account.planfix.ru/rest/customfield/task?fields=id,name,names,type" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
-### Вариант B: Получить шаблоны задач с их полями
+Ответ содержит массив `customfields` (lowercase).
+
+### Вариант B: Получить поля для конкретной задачи (GET /customfield/task/{id})
+
+Если `/customfield/task` вернул пусто, попробуйте с номером существующей задачи:
 
 ```bash
-curl -X GET "https://your-account.planfix.ru/rest/task/templates?fields=id,name,customFields" \
+curl -X GET "https://your-account.planfix.ru/rest/customfield/task/86190?fields=id,name,names,type" \
   -H "Authorization: Bearer YOUR_TOKEN"
 ```
 
@@ -49,12 +56,14 @@ async def get_fields():
     async with httpx.AsyncClient() as client:
         headers = {"Authorization": f"Bearer {os.getenv('PLANFIX_TOKEN')}"}
         response = await client.get(
-            f"{os.getenv('PLANFIX_BASE_URL')}/customfield/task",
+            f"{os.getenv('PLANFIX_BASE_URL', '').rstrip('/')}/customfield/task",
             headers=headers,
             params={"fields": "id,name,names,type"}
         )
         data = response.json()
-        for field in data.get("customFields", []):
+        # API возвращает customfields (lowercase)
+        fields = data.get("customfields") or data.get("customFields") or []
+        for field in fields:
             print(f"ID: {field['id']}, Название: {field.get('names', {}).get('ru', field.get('name'))}")
 
 asyncio.run(get_fields())
