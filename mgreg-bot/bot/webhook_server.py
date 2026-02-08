@@ -475,25 +475,51 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Extract budget (field 130) for invitation text
     reward_amount = None
     try:
-        # Planfix API may return customFieldData, customfielddata, or customfields
+        # Planfix API may return customFieldData, customfielddata, customfields, customFieldValues
         cf_data = (
             task_details.get("customFieldData")
             or task_details.get("customfielddata")
             or task_details.get("customfields")
+            or task_details.get("customFieldValues")
+            or task_details.get("customfieldvalues")
             or []
         )
         if settings.budget_field_id:
-            for item in cf_data:
-                if not isinstance(item, dict):
-                    continue
-                # Support {field: {id: 130}, value: X}, {field: 130, value: X}, {id: 130, value: X}
-                field = item.get("field") or item.get("fieldId")
-                fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
-                if fid is not None and int(fid) == settings.budget_field_id:
-                    reward_amount = item.get("value")
-                    break
-    except (NameError, TypeError, ValueError):
-        pass  # task_details not available or extraction failed
+            # Support customFields as dict: {130: "1500"}
+            cf_dict = task_details.get("customFields") or task_details.get("customfields") or {}
+            if isinstance(cf_dict, dict):
+                reward_amount = cf_dict.get(settings.budget_field_id) or cf_dict.get(str(settings.budget_field_id))
+            # Support customFieldData as array
+            if reward_amount is None:
+                for item in cf_data:
+                    if not isinstance(item, dict):
+                        continue
+                    # Support {field: {id: 130}, value: X}, {customField: {id: 130}, value: X}, {field: 130, value: X}, {id: 130, value: X}
+                    field = item.get("field") or item.get("fieldId") or item.get("customField")
+                    fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
+                    if fid is not None and int(fid) == settings.budget_field_id:
+                        reward_amount = item.get("value")
+                        break
+            # Fallback: try webhook payload (task object from Planfix)
+            if reward_amount is None and data.get("task"):
+                webhook_task = data.get("task", {}) if isinstance(data.get("task"), dict) else {}
+                wf_cf = (
+                    webhook_task.get("customFieldData")
+                    or webhook_task.get("customfielddata")
+                    or webhook_task.get("customFieldValues")
+                    or []
+                )
+                for item in wf_cf:
+                    if not isinstance(item, dict):
+                        continue
+                    field = item.get("field") or item.get("customField") or item.get("fieldId")
+                    fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
+                    if fid is not None and int(fid) == settings.budget_field_id:
+                        reward_amount = item.get("value")
+                        break
+            logger.info("budget_extraction", task_nomber=task_nomber, reward_amount=reward_amount)
+    except (NameError, TypeError, ValueError) as e:
+        logger.warning("budget_extraction_failed", error=str(e))
 
     # Send invitations (using task_id for internal reference)
     await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date, reward_amount=reward_amount)

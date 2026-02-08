@@ -181,6 +181,12 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
         )
 
         if assignment_success:
+            # Remove Accept/Decline buttons from invitation message
+            try:
+                await callback.message.edit_reply_markup(reply_markup=None)
+            except Exception as e:
+                logger.warning("invitation_buttons_remove_failed", task_id=task_id, error=str(e))
+
             # Send success message with WebApp button (stored for deletion after form submit)
             webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings, client=client)
             if webapp_url:
