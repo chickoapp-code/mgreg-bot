@@ -1242,20 +1242,18 @@ async def handle_form_submission(
             {"field": {"id": settings.result_files_field_id}, "value": file_ids}
         )
 
-    # Update task
-    
-    if custom_field_data:
+    # Update task (custom fields + status in one request for reliability)
+    has_custom = bool(custom_field_data)
+    has_status = settings.status_done_id is not None
+    if has_custom or has_status:
         try:
-            await planfix_client.update_task(task_nomber, custom_field_data=custom_field_data)
+            await planfix_client.update_task(
+                task_nomber,
+                custom_field_data=custom_field_data if has_custom else None,
+                status=settings.status_done_id if has_status else None,
+            )
         except PlanfixError as e:
             logger.error("planfix_task_update_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
-
-    # Change status to "Done"
-    if settings.status_done_id:
-        try:
-            await planfix_client.update_task(task_nomber, status=settings.status_done_id)
-        except PlanfixError as e:
-            logger.error("planfix_status_update_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
 
     # Add comment
     comment_text = f"✅ Анкета получена от гостя (ID: {guest_id}). Форма: {form}."
@@ -1278,12 +1276,14 @@ async def handle_form_submission(
                 "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
                 (guest_id,),
             )
-            # Delete the assignment message (e.g. "Отлично! Ты закреплён(а)... Нажми «Начать прохождение»")
-            if task_row and task_row.get("assignment_chat_id") and task_row.get("assignment_message_id"):
+            # Delete the assignment message (sqlite3.Row uses indexing, not .get())
+            chat_id = task_row["assignment_chat_id"] if task_row else None
+            msg_id = task_row["assignment_message_id"] if task_row else None
+            if chat_id is not None and msg_id is not None:
                 try:
                     await bot_instance.delete_message(
-                        chat_id=task_row["assignment_chat_id"],
-                        message_id=task_row["assignment_message_id"],
+                        chat_id=chat_id,
+                        message_id=msg_id,
                     )
                 except Exception as del_err:
                     logger.warning("assignment_message_delete_failed", task_id=task_id, error=str(del_err))
