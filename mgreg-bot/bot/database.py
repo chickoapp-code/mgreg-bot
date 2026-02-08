@@ -39,8 +39,13 @@ class Database:
             try:
                 await db.execute("ALTER TABLE tasks ADD COLUMN nomber TEXT")
             except Exception:
-                # Column already exists, ignore
                 pass
+            # Add assignment message columns for "Начать прохождение" message (to delete after form submit)
+            for col in ("assignment_chat_id", "assignment_message_id"):
+                try:
+                    await db.execute(f"ALTER TABLE tasks ADD COLUMN {col} INTEGER")
+                except Exception:
+                    pass
 
             # Invitations table
             await db.execute("""

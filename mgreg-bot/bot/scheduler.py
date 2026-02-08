@@ -250,16 +250,24 @@ async def retry_executor_assignments() -> None:
                                     ]
                                 ]
                             )
-                            await bot_instance.send_message(
+                            msg = await bot_instance.send_message(
                                 telegram_id,
                                 "✅ Отлично! Ты теперь назначен(а) исполнителем задачи. Нажми «Начать прохождение», чтобы заполнить анкету.",
                                 reply_markup=keyboard,
                             )
                         else:
-                            await bot_instance.send_message(
+                            msg = await bot_instance.send_message(
                                 telegram_id,
                                 "✅ Отлично! Ты теперь назначен(а) исполнителем задачи. Свяжемся с тобой для дальнейших инструкций.",
                             )
+                        # Store message for deletion after form submission
+                        try:
+                            await db.execute(
+                                "UPDATE tasks SET assignment_chat_id = ?, assignment_message_id = ? WHERE task_id = ?",
+                                (msg.chat.id, msg.message_id, task_row["task_id"]),
+                            )
+                        except Exception as store_err:
+                            logger.warning("assignment_message_store_failed", task_id=task_row["task_id"], error=str(store_err))
                 except Exception as e:
                     logger.warning("retry_user_notification_failed", task_nomber=task_nomber, error=str(e))
                     

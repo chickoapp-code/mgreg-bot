@@ -181,7 +181,7 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
         )
 
         if assignment_success:
-            # Send success message with WebApp button
+            # Send success message with WebApp button (stored for deletion after form submit)
             webapp_url = await generate_webapp_url(task_id, guest_planfix_id, settings, client=client)
             if webapp_url:
                 from aiogram.types import InlineKeyboardButton, InlineKeyboardMarkup, WebAppInfo
@@ -196,14 +196,22 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                         ]
                     ]
                 )
-                await callback.message.answer(
+                msg = await callback.message.answer(
                     "Отлично! Ты закреплён(а) за этой проверкой. Нажми «Начать прохождение», чтобы заполнить анкету.",
                     reply_markup=keyboard,
                 )
             else:
-                await callback.message.answer(
+                msg = await callback.message.answer(
                     "Отлично! Ты закреплён(а) за этой проверкой. Свяжемся с тобой для дальнейших инструкций."
                 )
+            # Store message_id for deletion after form submission
+            try:
+                await db.execute(
+                    "UPDATE tasks SET assignment_chat_id = ?, assignment_message_id = ? WHERE task_id = ?",
+                    (msg.chat.id, msg.message_id, task_id),
+                )
+            except Exception as e:
+                logger.warning("assignment_message_store_failed", task_id=task_id, error=str(e))
         else:
             # Task not found via API yet, but assignment is recorded in DB
             await callback.message.answer(

@@ -1267,6 +1267,42 @@ async def handle_form_submission(
     except PlanfixError as e:
         logger.error("planfix_comment_add_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))
 
+    # Delete "Начать прохождение" message and send thank you to the guest
+    if bot_instance:
+        try:
+            task_row = await db.fetch_one(
+                "SELECT assignment_chat_id, assignment_message_id FROM tasks WHERE task_id = ?",
+                (task_id,),
+            )
+            guest_mapping = await db.fetch_one(
+                "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                (guest_id,),
+            )
+            # Delete the assignment message (e.g. "Отлично! Ты закреплён(а)... Нажми «Начать прохождение»")
+            if task_row and task_row.get("assignment_chat_id") and task_row.get("assignment_message_id"):
+                try:
+                    await bot_instance.delete_message(
+                        chat_id=task_row["assignment_chat_id"],
+                        message_id=task_row["assignment_message_id"],
+                    )
+                except Exception as del_err:
+                    logger.warning("assignment_message_delete_failed", task_id=task_id, error=str(del_err))
+                await db.execute(
+                    "UPDATE tasks SET assignment_chat_id = NULL, assignment_message_id = NULL WHERE task_id = ?",
+                    (task_id,),
+                )
+            # Send thank you to the guest
+            if guest_mapping:
+                telegram_id = guest_mapping["telegram_id"]
+                thank_you_text = (
+                    "Благодарим за прохождение проверки! "
+                    "Скоро вы получите вознаграждение."
+                )
+                await bot_instance.send_message(telegram_id, thank_you_text)
+                logger.info("guest_thank_you_sent", task_id=task_id, guest_id=guest_id)
+        except Exception as e:
+            logger.error("guest_notification_failed", task_id=task_id, guest_id=guest_id, error=str(e))
+
     # Notify admin
     if bot_instance and settings.admin_chat_id:
         try:
