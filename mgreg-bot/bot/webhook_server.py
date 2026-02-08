@@ -790,12 +790,30 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
     logger.info("planfix_task_completed_compensation", task_id=task_id, guest_id=guest_id)
     
     # Notify guest: success message + payment amount
-    if bot_instance and guest_id:
-        db = get_database()
-        mapping = await db.fetch_one(
-            "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
-            (guest_id,),
-        )
+    db = get_database()
+    if bot_instance and (guest_id or task_id):
+        mapping = None
+        if guest_id:
+            mapping = await db.fetch_one(
+                "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                (guest_id,),
+            )
+        # Planfix may send different guest ID than assigned_guest_id. Fallback to tasks.assigned_guest_id.
+        if not mapping and task_id:
+            task_id_int = _parse_int(task_id) if task_id else None
+            if task_id_int is not None:
+                task_row = await db.fetch_one(
+                    "SELECT assigned_guest_id FROM tasks WHERE task_id = ?",
+                    (task_id_int,),
+                )
+                if task_row and task_row["assigned_guest_id"]:
+                    assigned_id = task_row["assigned_guest_id"]
+                    if assigned_id != guest_id:
+                        guest_id = assigned_id
+                    mapping = await db.fetch_one(
+                        "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                        (assigned_id,),
+                    )
         if mapping:
             amount = None
             if isinstance(finance, dict):
@@ -1007,6 +1025,20 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
         "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
         (guest_planfix_id,),
     )
+    # Planfix may send different guest ID (e.g. 5189802) than assigned_guest_id (e.g. 427). Fallback to assigned_guest_id from tasks.
+    if not mapping:
+        task_id_from_webhook = task_obj.get("id") or data.get("taskId")
+        task_id_int = _parse_int(task_id_from_webhook) if task_id_from_webhook else None
+        task_row = await db.fetch_one(
+            "SELECT assigned_guest_id FROM tasks WHERE nomber = ? OR task_id = ?",
+            (str(task_nomber), task_id_int if task_id_int is not None else task_nomber),
+        )
+        if task_row and task_row["assigned_guest_id"] and task_row["assigned_guest_id"] != guest_planfix_id:
+            guest_planfix_id = task_row["assigned_guest_id"]
+            mapping = await db.fetch_one(
+                "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                (guest_planfix_id,),
+            )
     if not mapping:
         logger.warning("planfix_task_updated_guest_not_in_bot", guest_id=guest_planfix_id)
         return
