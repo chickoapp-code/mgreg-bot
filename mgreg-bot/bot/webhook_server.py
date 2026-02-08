@@ -192,6 +192,21 @@ def verify_webapp_signature(params: Dict[str, str], signature: str, secret: str)
     return hmac.compare_digest(generate_webapp_signature(params, secret), signature)
 
 
+def _parse_yforms_result(result_raw: Any) -> Dict[str, Any]:
+    """Parse result from Yandex Forms webhook. Handles number, string '100', or dict."""
+    if isinstance(result_raw, (int, float)):
+        return {"score": result_raw}
+    if isinstance(result_raw, str):
+        try:
+            score_val = float(result_raw) if "." in result_raw else int(result_raw)
+            return {"score": score_val}
+        except (ValueError, TypeError):
+            return {"score": None}
+    if isinstance(result_raw, dict):
+        return result_raw
+    return {}
+
+
 # Note: planfix_client is now initialized in main.py lifespan and set via set_planfix_client()
 # Keeping @app.on_event handlers for backward compatibility, but they may not be called
 # if lifespan context manager is used
@@ -1014,13 +1029,7 @@ async def yforms_webhook(
             # Support both old format (form) and new format (formCode)
             form = params.get("form") or params.get("formCode")
             result_raw = params.get("result", {})
-            # Handle case when result is a number (score) or string instead of object
-            if isinstance(result_raw, (int, float, str)):
-                result = {"score": result_raw if isinstance(result_raw, (int, float)) else None}
-            elif isinstance(result_raw, dict):
-                result = result_raw
-            else:
-                result = {}
+            result = _parse_yforms_result(result_raw)
             attachments_raw = params.get("attachments", [])
             response_link = None
             if isinstance(attachments_raw, str) and attachments_raw.startswith("http"):
@@ -1050,13 +1059,7 @@ async def yforms_webhook(
             # Support both old format (form) and new format (formCode)
             form = data.get("form") or data.get("formCode")
             result_raw = data.get("result", {})
-            # Handle case when result is a number (score) or string instead of object
-            if isinstance(result_raw, (int, float, str)):
-                result = {"score": result_raw if isinstance(result_raw, (int, float)) else None}
-            elif isinstance(result_raw, dict):
-                result = result_raw
-            else:
-                result = {}
+            result = _parse_yforms_result(result_raw)
             attachments_raw = data.get("attachments", [])
             response_link = None
             if isinstance(attachments_raw, str) and attachments_raw.startswith("http"):
