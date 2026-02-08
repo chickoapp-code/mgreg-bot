@@ -276,7 +276,18 @@ async def planfix_webhook(
     logger.info("planfix_webhook_body_received", body_length=len(body))
 
     try:
-        data = json.loads(body)
+        try:
+            data = json.loads(body)
+        except json.JSONDecodeError as je:
+            # Planfix sometimes sends JSON with trailing commas or other issues
+            try:
+                import json5
+                data = json5.loads(body.decode("utf-8", errors="replace"))
+                logger.info("planfix_webhook_json5_fallback", json_error=str(je))
+            except Exception:
+                body_preview = body[:300].decode("utf-8", errors="replace")
+                logger.error("planfix_webhook_json_parse_failed", error=str(je), body_preview=body_preview)
+                raise
         logger.info("planfix_webhook_json_parsed", data_keys=list(data.keys()) if isinstance(data, dict) else None)
         
         event = data.get("event")
@@ -518,6 +529,15 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
                         reward_amount = item.get("value")
                         break
             logger.info("budget_extraction", task_nomber=task_nomber, reward_amount=reward_amount)
+            if reward_amount is None and task_details:
+                # Debug: log structure to diagnose Planfix API response format
+                cf_raw = task_details.get("customFieldData") or task_details.get("customfielddata") or cf_data
+                logger.info(
+                    "budget_extraction_debug",
+                    task_nomber=task_nomber,
+                    task_keys=list(task_details.keys()),
+                    cf_data_sample=str(cf_raw)[:500] if cf_raw else "empty",
+                )
     except (NameError, TypeError, ValueError) as e:
         logger.warning("budget_extraction_failed", error=str(e))
 

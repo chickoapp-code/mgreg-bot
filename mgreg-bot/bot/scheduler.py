@@ -167,12 +167,12 @@ async def retry_executor_assignments() -> None:
             task_nomber = None
         
         if not task_nomber:
-            # Fallback to task_id if nomber is not available (for backward compatibility)
-            task_nomber = str(task_row["task_id"])
-            logger.warning("nomber_not_found_using_task_id", task_id=task_row["task_id"])
-        
+            # Skip - Planfix API expects nomber, not task_id; task would return 400
+            logger.debug("retry_skip_no_nomber", task_id=task_row["task_id"])
+            continue
+
         guest_planfix_id = task_row["assigned_guest_id"]
-        
+
         try:
             # Check if executor is already assigned in Planfix
             # Use nomber (task number from webhook) for API calls
@@ -205,7 +205,7 @@ async def retry_executor_assignments() -> None:
                 # Already assigned, skip
                 logger.debug("executor_already_assigned", task_nomber=task_nomber, guest_id=guest_planfix_id)
                 continue
-            
+
             # Try to assign executor
             logger.info("retry_executor_assignment", task_nomber=task_nomber, guest_id=guest_planfix_id)
             await planfix_client.set_task_executors(task_nomber, [guest_planfix_id])
@@ -287,13 +287,15 @@ async def retry_executor_assignments() -> None:
                     
         except PlanfixError as e:
             if e.is_task_not_found():
-                # Task still not found, will retry later
-                # This is normal - task nomber comes from webhook, but task may not be available via REST API yet
-                logger.debug(
-                    "retry_task_still_not_found",
-                    task_nomber=task_nomber,
-                    note="Task nomber from webhook, but task not yet available via REST API. Will retry."
-                )
+                # Task deleted/archived in Planfix - clear to stop retrying
+                try:
+                    await db.execute(
+                        "UPDATE tasks SET assigned_guest_id = NULL WHERE task_id = ? OR nomber = ?",
+                        (task_row["task_id"], task_nomber),
+                    )
+                    logger.info("retry_task_not_found_cleared", task_id=task_row["task_id"], task_nomber=task_nomber)
+                except Exception as db_err:
+                    logger.warning("retry_clear_failed", task_id=task_row["task_id"], error=str(db_err))
             else:
                 # Other error, log it
                 logger.warning("retry_executor_assignment_failed", task_nomber=task_nomber, error=str(e))
