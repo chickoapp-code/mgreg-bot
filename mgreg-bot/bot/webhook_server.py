@@ -959,6 +959,13 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
     if not status_id:
         return
 
+    logger.info(
+        "planfix_task_updated_processing",
+        task_nomber=task_nomber,
+        status_id=status_id,
+        status_answers_review_id=settings.status_answers_review_id,
+    )
+
     # Prefer guest from webhook (guest.planfixContactId)
     guest_planfix_id = _parse_int(guest_obj.get("planfixContactId"))
     if not guest_planfix_id:
@@ -982,9 +989,11 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
 
     if not guest_planfix_id:
         db = get_database()
+        task_id_from_webhook = task_obj.get("id") or data.get("taskId")
+        task_id_int = _parse_int(task_id_from_webhook) if task_id_from_webhook else None
         task_row = await db.fetch_one(
             "SELECT assigned_guest_id FROM tasks WHERE nomber = ? OR task_id = ?",
-            (str(task_nomber), task_nomber),
+            (str(task_nomber), task_id_int if task_id_int is not None else task_nomber),
         )
         if task_row:
             guest_planfix_id = task_row["assigned_guest_id"]
@@ -1044,6 +1053,15 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
             logger.info("guest_notified_payment_amount", task_nomber=task_nomber, guest_id=guest_planfix_id, amount=amount_str)
         except Exception as e:
             logger.error("guest_notify_payment_failed", telegram_id=telegram_id, error=str(e))
+
+    else:
+        logger.info(
+            "planfix_task_updated_status_no_notification",
+            task_nomber=task_nomber,
+            status_id=status_id,
+            status_answers_review_id=settings.status_answers_review_id,
+            status_payment_notification_id=settings.status_payment_notification_id,
+        )
 
 
 async def send_invitations(
