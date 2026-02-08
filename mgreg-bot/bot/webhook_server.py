@@ -472,8 +472,24 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
         logger.error("planfix_task_assignees_check_failed", task_nomber=task_nomber, error=str(e))
         # Continue anyway - will check again when guest accepts
 
+    # Extract budget (field 130) for invitation text
+    reward_amount = None
+    try:
+        cf_data = task_details.get("customFieldData") or task_details.get("customfielddata") or []
+        if settings.budget_field_id:
+            for item in cf_data:
+                if not isinstance(item, dict):
+                    continue
+                field = item.get("field") or item.get("fieldId")
+                fid = field.get("id") if isinstance(field, dict) else field
+                if fid == settings.budget_field_id:
+                    reward_amount = item.get("value")
+                    break
+    except NameError:
+        pass  # task_details not available (Planfix fetch failed)
+
     # Send invitations (using task_id for internal reference)
-    await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date)
+    await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date, reward_amount=reward_amount)
 
     # Set status to "В подборе гостя" (111)
     if settings.status_guest_selection_id:
@@ -913,6 +929,8 @@ async def send_invitations(
     restaurant_name: str,
     restaurant_address: str,
     visit_date: str,
+    *,
+    reward_amount: str | int | float | None = None,
 ) -> None:
     """Send invitation messages to guests."""
     if not bot_instance:
@@ -924,6 +942,10 @@ async def send_invitations(
     not_found_guests = []
 
     logger.info("send_invitations_started", task_id=task_id, guest_ids=guest_ids, count=len(guest_ids))
+
+    reward_line = ""
+    if reward_amount is not None and str(reward_amount).strip():
+        reward_line = f"Вознаграждение: {reward_amount}\n"
 
     for guest_id in guest_ids:
         # Get telegram_id from mapping
@@ -943,6 +965,7 @@ async def send_invitations(
             f"Привет! Мы ищем Тайного гостя для ресторана «{restaurant_name}».\n"
             f"Адрес: {restaurant_address}\n"
             f"Проверка: {visit_date}\n"
+            f"{reward_line}"
             f"Нажми «Принять», если готов(а) пройти проверку."
         )
 
