@@ -279,15 +279,24 @@ async def planfix_webhook(
         try:
             data = json.loads(body)
         except json.JSONDecodeError as je:
-            # Planfix sometimes sends JSON with trailing commas or other issues
-            try:
-                import json5
-                data = json5.loads(body.decode("utf-8", errors="replace"))
-                logger.info("planfix_webhook_json5_fallback", json_error=str(je))
-            except Exception:
-                body_preview = body[:300].decode("utf-8", errors="replace")
-                logger.error("planfix_webhook_json_parse_failed", error=str(je), body_preview=body_preview)
-                raise
+            body_str = body.decode("utf-8", errors="replace")
+            data = None
+            # Planfix sometimes sends truncated JSON (missing root closing })
+            fixed = body_str.rstrip()
+            if fixed.endswith("}") and fixed.count("{") > fixed.count("}"):
+                try:
+                    data = json.loads(fixed + "}")
+                    logger.info("planfix_webhook_json_fixed_truncated")
+                except json.JSONDecodeError:
+                    pass
+            if data is None:
+                try:
+                    import json5
+                    data = json5.loads(body_str)
+                    logger.info("planfix_webhook_json5_fallback", json_error=str(je))
+                except Exception:
+                    logger.error("planfix_webhook_json_parse_failed", error=str(je), body_preview=body_str[:300])
+                    raise
         logger.info("planfix_webhook_json_parsed", data_keys=list(data.keys()) if isinstance(data, dict) else None)
         
         event = data.get("event")
@@ -317,10 +326,10 @@ async def planfix_webhook(
             await handle_task_completed_compensation(data)
         elif event == "task.deadline_updated":
             await handle_task_deadline_updated(data)
-        elif event == "task.updated":
+        elif event in ("task.updated", "task.update"):
+            # Planfix sends task.update (or task.updated) on status change
             await handle_task_updated(data)
         elif event in ("task.status_answers_review", "task.status_payment_notification"):
-            # Planfix automation: when status → 116 or 117, send these events
             await handle_task_updated(data)
         else:
             logger.info("planfix_webhook_unknown_event", event_type=event, task_number=task_number)
@@ -762,7 +771,7 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
     """Handle task.completed_compensation event - task completed, ready for compensation.
     
     Note: Planfix automation has already changed status to "Завершена (к компенсации)".
-    Bot should only update local database, add comment with results, and notify admin.
+    Bot: updates DB, adds comment, notifies admin, sends guest success + payment amount.
     """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     guest = data.get("guest", {})
@@ -772,11 +781,32 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
         guest_id = guest.get("planfixContactId") or guest.get("id") or guest.get("planfix_contact_id")
     elif isinstance(guest, (int, str)):
         guest_id = int(guest)
+    if guest_id is not None:
+        guest_id = _parse_int(guest_id)
     
     result = data.get("result", {})
     finance = data.get("finance", {})
     
     logger.info("planfix_task_completed_compensation", task_id=task_id, guest_id=guest_id)
+    
+    # Notify guest: success message + payment amount
+    if bot_instance and guest_id:
+        db = get_database()
+        mapping = await db.fetch_one(
+            "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+            (guest_id,),
+        )
+        if mapping:
+            amount = None
+            if isinstance(finance, dict):
+                amount = finance.get("actual") or finance.get("budget")
+            amount_str = str(amount).strip() if amount is not None else "будет указана"
+            msg = f"✅ Вы успешно прошли проверку.\n\nВам будет выплачена сумма: {amount_str}."
+            try:
+                await bot_instance.send_message(mapping["telegram_id"], msg)
+                logger.info("guest_thank_you_completed_compensation_sent", guest_id=guest_id, amount=amount_str)
+            except Exception as e:
+                logger.error("guest_completed_compensation_notify_failed", guest_id=guest_id, error=str(e))
     
     # Update database
     # Note: Planfix automation has already changed status to "Завершена (к компенсации)"
@@ -880,11 +910,24 @@ async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
     # Bot only updates local database and reschedules deadline check
 
 
+def _parse_int(v: Any) -> int | None:
+    """Parse int from string or int."""
+    if v is None:
+        return None
+    if isinstance(v, int):
+        return v
+    try:
+        return int(str(v).strip())
+    except (ValueError, TypeError):
+        return None
+
+
 async def handle_task_updated(data: Dict[str, Any]) -> None:
-    """Handle task.updated event.
+    """Handle task.updated / task.update event.
 
     When status is 116: send to guest "Ваши ответы на проверке".
-    When status is 117: send to guest notification about payment amount from field 132.
+    When status is 117: send to guest notification about payment amount from finance.budget/actual or field 132.
+    Prefers webhook data (task.statusId, guest.planfixContactId, finance.budget/actual) over API fetch.
     """
     task_nomber = get_task_number_from_webhook(data)
     if not task_nomber:
@@ -894,34 +937,48 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
     if not planfix_client or not bot_instance:
         return
 
-    try:
-        task = await planfix_client.get_task(
-            task_nomber,
-            fields="id,status,assignees,customFieldData",
-        )
-    except PlanfixError as e:
-        logger.warning("planfix_task_updated_fetch_failed", task_nomber=task_nomber, error=str(e))
-        return
+    task_obj = data.get("task") or {}
+    guest_obj = data.get("guest") or {}
+    finance_obj = data.get("finance") or {}
+    api_task: Dict[str, Any] | None = None
 
-    status_obj = task.get("status")
-    status_id = int(status_obj["id"]) if isinstance(status_obj, dict) and status_obj.get("id") else None
+    # Prefer statusId from webhook
+    status_id = _parse_int(task_obj.get("statusId"))
+    if status_id is None:
+        try:
+            api_task = await planfix_client.get_task(
+                task_nomber,
+                fields="id,status,assignees,customFieldData",
+            )
+        except PlanfixError as e:
+            logger.warning("planfix_task_updated_fetch_failed", task_nomber=task_nomber, error=str(e))
+            return
+        status_obj = api_task.get("status")
+        status_id = int(status_obj["id"]) if isinstance(status_obj, dict) and status_obj.get("id") else None
+
     if not status_id:
         return
 
-    # Get guest (assignee) - from assignees or from DB
-    guest_planfix_id = None
-    assignees = task.get("assignees", {})
-    users = assignees.get("users", []) if isinstance(assignees, dict) else (assignees if isinstance(assignees, list) else [])
-    if users:
-        first_user = users[0] if users else {}
-        user_id = first_user.get("id") if isinstance(first_user, dict) else None
-        if user_id:
-            # Format can be "contact:427" or 427
-            s = str(user_id)
-            if ":" in s:
-                guest_planfix_id = int(s.split(":")[-1])
-            else:
-                guest_planfix_id = int(s)
+    # Prefer guest from webhook (guest.planfixContactId)
+    guest_planfix_id = _parse_int(guest_obj.get("planfixContactId"))
+    if not guest_planfix_id:
+        if not api_task:
+            try:
+                api_task = await planfix_client.get_task(task_nomber, fields="assignees")
+            except PlanfixError:
+                api_task = {}
+        task = api_task or {}
+        assignees = task.get("assignees", {})
+        users = assignees.get("users", []) if isinstance(assignees, dict) else (assignees if isinstance(assignees, list) else [])
+        if users:
+            first_user = users[0] if users else {}
+            user_id = first_user.get("id") if isinstance(first_user, dict) else None
+            if user_id:
+                s = str(user_id)
+                if ":" in s:
+                    guest_planfix_id = int(s.split(":")[-1])
+                else:
+                    guest_planfix_id = int(s)
 
     if not guest_planfix_id:
         db = get_database()
@@ -954,24 +1011,31 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
         except Exception as e:
             logger.error("guest_notify_answers_review_failed", telegram_id=telegram_id, error=str(e))
 
-    elif status_id == settings.status_payment_notification_id and settings.payment_amount_field_id:
-        amount = None
-        # Planfix API may return customFieldData, customfielddata, or customfields
-        cf_data = (
-            task.get("customFieldData")
-            or task.get("customfielddata")
-            or task.get("customfields")
-            or []
-        )
-        for item in cf_data:
-            if not isinstance(item, dict):
-                continue
-            field = item.get("field") or item.get("fieldId")
-            fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
-            if fid is not None and int(fid) == settings.payment_amount_field_id:
-                amount = item.get("value", "")
-                break
-        amount_str = str(amount) if amount is not None else "—"
+    elif status_id == settings.status_payment_notification_id:
+        # Prefer amount from webhook (finance.budget or finance.actual)
+        amount = finance_obj.get("budget") or finance_obj.get("actual")
+        if amount is None and settings.payment_amount_field_id:
+            if not api_task:
+                try:
+                    api_task = await planfix_client.get_task(task_nomber, fields="customFieldData")
+                except PlanfixError:
+                    api_task = {}
+            task = api_task or {}
+            cf_data = (
+                task.get("customFieldData")
+                or task.get("customfielddata")
+                or task.get("customfields")
+                or []
+            )
+            for item in cf_data:
+                if not isinstance(item, dict):
+                    continue
+                field = item.get("field") or item.get("fieldId")
+                fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
+                if fid is not None and int(fid) == settings.payment_amount_field_id:
+                    amount = item.get("value", "")
+                    break
+        amount_str = str(amount).strip() if amount is not None else "—"
         try:
             await bot_instance.send_message(
                 telegram_id,
