@@ -1025,7 +1025,7 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
         "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
         (guest_planfix_id,),
     )
-    # Planfix may send different guest ID (e.g. 5189802) than assigned_guest_id (e.g. 427). Fallback to assigned_guest_id from tasks.
+    # Planfix may send different guest ID (e.g. 5189802) than assigned_guest_id (e.g. 427). Try assigned_guest_id from tasks.
     if not mapping:
         task_id_from_webhook = task_obj.get("id") or data.get("taskId")
         task_id_int = _parse_int(task_id_from_webhook) if task_id_from_webhook else None
@@ -1033,14 +1033,22 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
             "SELECT assigned_guest_id FROM tasks WHERE nomber = ? OR task_id = ?",
             (str(task_nomber), task_id_int if task_id_int is not None else task_nomber),
         )
-        if task_row and task_row["assigned_guest_id"] and task_row["assigned_guest_id"] != guest_planfix_id:
-            guest_planfix_id = task_row["assigned_guest_id"]
+        if task_row and task_row["assigned_guest_id"]:
+            assigned_id = task_row["assigned_guest_id"]
             mapping = await db.fetch_one(
                 "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
-                (guest_planfix_id,),
+                (assigned_id,),
             )
+            if mapping:
+                logger.info("planfix_task_updated_guest_fallback", webhook_guest_id=guest_planfix_id, assigned_guest_id=assigned_id)
+                guest_planfix_id = assigned_id
     if not mapping:
-        logger.warning("planfix_task_updated_guest_not_in_bot", guest_id=guest_planfix_id)
+        logger.warning(
+            "planfix_task_updated_guest_not_in_bot",
+            guest_id=guest_planfix_id,
+            task_nomber=task_nomber,
+            assigned_guest_id=task_row["assigned_guest_id"] if task_row else None,
+        )
         return
 
     telegram_id = mapping["telegram_id"]
