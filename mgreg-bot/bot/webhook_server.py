@@ -840,7 +840,7 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
         if mapping:
             amount = None
             if isinstance(finance, dict):
-                amount = finance.get("actual") or finance.get("budget")
+                amount = finance.get("actual")  # Фактические расходы only
             amount_str = str(amount).strip() if amount is not None else "будет указана"
             msg = f"✅ Вы успешно прошли проверку.\n\nВам будет выплачена сумма: {amount_str}."
             try:
@@ -1110,38 +1110,8 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
             logger.error("guest_notify_answers_review_failed", telegram_id=telegram_id, error=str(e))
 
     elif status_id == settings.status_payment_notification_id:
-        # Prefer amount from webhook (finance.budget or finance.actual)
-        amount = finance_obj.get("budget") or finance_obj.get("actual")
-        if amount is None and settings.payment_amount_field_id:
-            if not api_task:
-                try:
-                    api_task = await planfix_client.get_task(task_nomber, fields="customFieldData")
-                except PlanfixError:
-                    api_task = {}
-            task = api_task or {}
-            cf_data = (
-                task.get("customFieldData")
-                or task.get("customfielddata")
-                or task.get("customfields")
-                or []
-            )
-            for item in cf_data:
-                if not isinstance(item, dict):
-                    continue
-                field = item.get("field") or item.get("fieldId")
-                fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
-                if fid is not None and int(fid) == settings.payment_amount_field_id:
-                    amount = item.get("value", "")
-                    break
-        amount_str = str(amount).strip() if amount is not None else "—"
-        try:
-            await bot_instance.send_message(
-                telegram_id,
-                f"Вам будет отправлена сумма в размере {amount_str}.",
-            )
-            logger.info("guest_notified_payment_amount", task_nomber=task_nomber, guest_id=guest_planfix_id, amount=amount_str)
-        except Exception as e:
-            logger.error("guest_notify_payment_failed", telegram_id=telegram_id, error=str(e))
+        # Payment notification sent by task.completed_compensation only. Skip here to avoid duplicate.
+        pass
 
     else:
         logger.info(
