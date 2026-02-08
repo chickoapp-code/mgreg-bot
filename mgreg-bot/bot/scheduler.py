@@ -218,7 +218,21 @@ async def retry_executor_assignments() -> None:
                 )
             except PlanfixError as comment_error:
                 logger.warning("retry_comment_add_failed", task_nomber=task_nomber, error=str(comment_error))
-            
+
+            # Set status to 113 "Ожидаем визит", then 114 "Ожидаем анкету"
+            from bot.config import get_settings
+            s = get_settings()
+            if s.status_waiting_visit_id:
+                try:
+                    await planfix_client.update_task(task_nomber, status=s.status_waiting_visit_id)
+                except PlanfixError as e:
+                    logger.warning("retry_status_113_failed", task_nomber=task_nomber, error=str(e))
+            if s.status_waiting_form_id:
+                try:
+                    await planfix_client.update_task(task_nomber, status=s.status_waiting_form_id)
+                except PlanfixError as e:
+                    logger.warning("retry_status_114_failed", task_nomber=task_nomber, error=str(e))
+
             logger.info("retry_executor_assignment_success", task_nomber=task_nomber, guest_id=guest_planfix_id)
             
             # Notify user via Telegram if bot instance is available

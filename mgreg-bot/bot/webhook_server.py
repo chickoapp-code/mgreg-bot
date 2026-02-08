@@ -308,6 +308,9 @@ async def planfix_webhook(
             await handle_task_deadline_updated(data)
         elif event == "task.updated":
             await handle_task_updated(data)
+        elif event in ("task.status_answers_review", "task.status_payment_notification"):
+            # Planfix automation: when status → 116 or 117, send these events
+            await handle_task_updated(data)
         else:
             logger.info("planfix_webhook_unknown_event", event_type=event, task_number=task_number)
 
@@ -471,6 +474,13 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
 
     # Send invitations (using task_id for internal reference)
     await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date)
+
+    # Set status to "В подборе гостя" (111)
+    if settings.status_guest_selection_id:
+        try:
+            await planfix_client.update_task(task_nomber, status=settings.status_guest_selection_id)
+        except PlanfixError as e:
+            logger.error("planfix_status_guest_selection_failed", task_nomber=task_nomber, error=str(e))
 
     # Schedule deadline check
     if deadline:
@@ -787,10 +797,99 @@ async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
 
 
 async def handle_task_updated(data: Dict[str, Any]) -> None:
-    """Handle task.updated event."""
-    # Can be used for additional logic if needed
-    task_id = data.get("taskId") or data.get("task", {}).get("id")
-    logger.info("planfix_task_updated", task_id=task_id)
+    """Handle task.updated event.
+
+    When status is 116: send to guest "Ваши ответы на проверке".
+    When status is 117: send to guest notification about payment amount from field 132.
+    """
+    task_nomber = get_task_number_from_webhook(data)
+    if not task_nomber:
+        logger.warning("planfix_task_updated_missing_nomber")
+        return
+
+    if not planfix_client or not bot_instance:
+        return
+
+    try:
+        task = await planfix_client.get_task(
+            task_nomber,
+            fields="id,status,assignees,customFieldData",
+        )
+    except PlanfixError as e:
+        logger.warning("planfix_task_updated_fetch_failed", task_nomber=task_nomber, error=str(e))
+        return
+
+    status_obj = task.get("status")
+    status_id = int(status_obj["id"]) if isinstance(status_obj, dict) and status_obj.get("id") else None
+    if not status_id:
+        return
+
+    # Get guest (assignee) - from assignees or from DB
+    guest_planfix_id = None
+    assignees = task.get("assignees", {})
+    users = assignees.get("users", []) if isinstance(assignees, dict) else (assignees if isinstance(assignees, list) else [])
+    if users:
+        first_user = users[0] if users else {}
+        user_id = first_user.get("id") if isinstance(first_user, dict) else None
+        if user_id:
+            # Format can be "contact:427" or 427
+            s = str(user_id)
+            if ":" in s:
+                guest_planfix_id = int(s.split(":")[-1])
+            else:
+                guest_planfix_id = int(s)
+
+    if not guest_planfix_id:
+        db = get_database()
+        task_row = await db.fetch_one(
+            "SELECT assigned_guest_id FROM tasks WHERE nomber = ? OR task_id = ?",
+            (str(task_nomber), task_nomber),
+        )
+        if task_row:
+            guest_planfix_id = task_row["assigned_guest_id"]
+
+    if not guest_planfix_id:
+        logger.info("planfix_task_updated_no_guest", task_nomber=task_nomber)
+        return
+
+    db = get_database()
+    mapping = await db.fetch_one(
+        "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+        (guest_planfix_id,),
+    )
+    if not mapping:
+        logger.warning("planfix_task_updated_guest_not_in_bot", guest_id=guest_planfix_id)
+        return
+
+    telegram_id = mapping["telegram_id"]
+
+    if status_id == settings.status_answers_review_id:
+        try:
+            await bot_instance.send_message(telegram_id, "Ваши ответы на проверке.")
+            logger.info("guest_notified_answers_review", task_nomber=task_nomber, guest_id=guest_planfix_id)
+        except Exception as e:
+            logger.error("guest_notify_answers_review_failed", telegram_id=telegram_id, error=str(e))
+
+    elif status_id == settings.status_payment_notification_id and settings.payment_amount_field_id:
+        amount = None
+        cf_data = task.get("customFieldData") or task.get("customfielddata") or []
+        for item in cf_data:
+            if not isinstance(item, dict):
+                continue
+            field = item.get("field") or item.get("fieldId")
+            fid = field.get("id") if isinstance(field, dict) else field
+            if fid == settings.payment_amount_field_id:
+                amount = item.get("value", "")
+                break
+        amount_str = str(amount) if amount is not None else "—"
+        try:
+            await bot_instance.send_message(
+                telegram_id,
+                f"Вам будет отправлена сумма в размере {amount_str}.",
+            )
+            logger.info("guest_notified_payment_amount", task_nomber=task_nomber, guest_id=guest_planfix_id, amount=amount_str)
+        except Exception as e:
+            logger.error("guest_notify_payment_failed", telegram_id=telegram_id, error=str(e))
 
 
 async def send_invitations(
@@ -1244,13 +1343,14 @@ async def handle_form_submission(
 
     # Update task (custom fields + status in one request for reliability)
     has_custom = bool(custom_field_data)
-    has_status = settings.status_done_id is not None
+    status_id = settings.status_form_received_id or settings.status_done_id  # 115 Анкета получена
+    has_status = status_id is not None
     if has_custom or has_status:
         try:
             await planfix_client.update_task(
                 task_nomber,
                 custom_field_data=custom_field_data if has_custom else None,
-                status=settings.status_done_id if has_status else None,
+                status=status_id if has_status else None,
             )
         except PlanfixError as e:
             logger.error("planfix_task_update_failed", task_id=task_id, task_nomber=task_nomber, error=str(e))

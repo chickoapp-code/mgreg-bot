@@ -212,6 +212,21 @@ async def handle_accept(callback: CallbackQuery, bot_data: dict) -> None:
                 )
             except Exception as e:
                 logger.warning("assignment_message_store_failed", task_id=task_id, error=str(e))
+
+            # Set status to 113 "Ожидаем визит", then 114 "Ожидаем анкету"
+            if settings:
+                sid113 = getattr(settings, "status_waiting_visit_id", None)
+                sid114 = getattr(settings, "status_waiting_form_id", None)
+                if sid113:
+                    try:
+                        await client.update_task(task_nomber, status=sid113)
+                    except PlanfixError as e:
+                        logger.warning("planfix_status_113_failed", task_nomber=task_nomber, error=str(e))
+                if sid114:
+                    try:
+                        await client.update_task(task_nomber, status=sid114)
+                    except PlanfixError as e:
+                        logger.warning("planfix_status_114_failed", task_nomber=task_nomber, error=str(e))
         else:
             # Task not found via API yet, but assignment is recorded in DB
             await callback.message.answer(

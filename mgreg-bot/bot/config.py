@@ -31,6 +31,15 @@ class Settings(BaseSettings):
     planfix_task_template_ids: Optional[str] = Field(default=None, alias="PLANFIX_TASK_TEMPLATE_IDS")
     status_done_id: Optional[int] = Field(default=None, alias="STATUS_DONE_ID")
     status_cancelled_id: Optional[int] = Field(default=None, alias="STATUS_CANCELLED_ID")
+    # Workflow statuses: 111 В подборе гостя, 113 Ожидаем визит, 114 Ожидаем анкету, 115 Анкета получена
+    status_guest_selection_id: Optional[int] = Field(default=None, alias="STATUS_GUEST_SELECTION_ID")
+    status_waiting_visit_id: Optional[int] = Field(default=None, alias="STATUS_WAITING_VISIT_ID")
+    status_waiting_form_id: Optional[int] = Field(default=None, alias="STATUS_WAITING_FORM_ID")
+    status_form_received_id: Optional[int] = Field(default=None, alias="STATUS_FORM_RECEIVED_ID")
+    # 116 Ответы на проверке → гостю "Ваши ответы на проверке"; 117 → уведомление о сумме из поля 132
+    status_answers_review_id: Optional[int] = Field(default=None, alias="STATUS_ANSWERS_REVIEW_ID")
+    status_payment_notification_id: Optional[int] = Field(default=None, alias="STATUS_PAYMENT_NOTIFICATION_ID")
+    payment_amount_field_id: Optional[int] = Field(default=None, alias="PAYMENT_AMOUNT_FIELD_ID")
     result_field_id: Optional[int] = Field(default=None, alias="RESULT_FIELD_ID")
     result_files_field_id: Optional[int] = Field(default=None, alias="RESULT_FILES_FIELD_ID")
     # Custom fields for guest assignment
