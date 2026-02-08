@@ -1021,10 +1021,17 @@ async def yforms_webhook(
                 result = result_raw
             else:
                 result = {}
-            attachments = params.get("attachments", [])
-            if not isinstance(attachments, list):
+            attachments_raw = params.get("attachments", [])
+            response_link = None
+            if isinstance(attachments_raw, str) and attachments_raw.startswith("http"):
+                response_link = attachments_raw
                 attachments = []
-            
+            elif isinstance(attachments_raw, list):
+                attachments = attachments_raw
+            else:
+                attachments = []
+            response_link = response_link or params.get("responseUrl") or params.get("formResponseUrl")
+
             logger.info(
                 "yforms_jsonrpc_received",
                 method=data.get("method"),
@@ -1050,9 +1057,16 @@ async def yforms_webhook(
                 result = result_raw
             else:
                 result = {}
-            attachments = data.get("attachments", [])
-            if not isinstance(attachments, list):
+            attachments_raw = data.get("attachments", [])
+            response_link = None
+            if isinstance(attachments_raw, str) and attachments_raw.startswith("http"):
+                response_link = attachments_raw
                 attachments = []
+            elif isinstance(attachments_raw, list):
+                attachments = attachments_raw
+            else:
+                attachments = []
+            response_link = response_link or data.get("responseUrl") or data.get("formResponseUrl")
 
         # Convert task_id to int if it's a string
         if task_id and isinstance(task_id, str):
@@ -1094,7 +1108,7 @@ async def yforms_webhook(
                 )
             raise HTTPException(status_code=400, detail="Missing required fields: sessionId and taskId")
 
-        await handle_form_submission(session_id, task_id, guest_id, form, result, attachments)
+        await handle_form_submission(session_id, task_id, guest_id, form, result, attachments, response_link=response_link)
 
         # Return JSON-RPC 2.0 response if request was JSON-RPC
         if isinstance(data, dict) and data.get("jsonrpc") == "2.0":
@@ -1142,6 +1156,8 @@ async def handle_form_submission(
     form: str,
     result: Dict[str, Any],
     attachments: list[Dict[str, Any]],
+    *,
+    response_link: Optional[str] = None,
 ) -> None:
     """Handle form submission."""
     db = get_database()
@@ -1171,7 +1187,14 @@ async def handle_form_submission(
 
     # Update Planfix task
     custom_field_data = []
-    result_text = f"Оценка: {score}\n{summary}" if score else summary
+    parts = []
+    if response_link:
+        parts.append(f"Ссылка на ответы: {response_link}")
+    if score is not None:
+        parts.append(f"Оценка: {score}")
+    if summary:
+        parts.append(summary)
+    result_text = "\n".join(parts) if parts else ""
     if settings.result_field_id:
         # 136 - Результат прохождения
         custom_field_data.append({"field": {"id": settings.result_field_id}, "value": result_text})
