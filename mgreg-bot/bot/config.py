@@ -38,10 +38,10 @@ class Settings(BaseSettings):
     status_form_received_id: Optional[int] = Field(default=None, alias="STATUS_FORM_RECEIVED_ID")
     # 116 Ответы на проверке → гостю "Ваши ответы на проверке"; 117 → уведомление о сумме из поля 132
     status_answers_review_id: Optional[int] = Field(default=None, alias="STATUS_ANSWERS_REVIEW_ID")
-    status_payment_notification_id: Optional[int] = Field(default=None, alias="STATUS_PAYMENT_NOTIFICATION_ID")
-    payment_amount_field_id: Optional[int] = Field(default=None, alias="PAYMENT_AMOUNT_FIELD_ID")
-    # 130 Бюджет на проверку / лимит возмещения — показывается в приглашении
-    budget_field_id: Optional[int] = Field(default=None, alias="BUDGET_FIELD_ID")
+    status_payment_notification_id: Optional[int] = Field(default=117, alias="STATUS_PAYMENT_NOTIFICATION_ID")
+    payment_amount_field_id: Optional[int] = Field(default=132, alias="PAYMENT_AMOUNT_FIELD_ID")
+    # 130 Бюджет на проверку / лимит возмещения — показывается в приглашении (по умолчанию 130)
+    budget_field_id: Optional[int] = Field(default=130, alias="BUDGET_FIELD_ID")
     result_field_id: Optional[int] = Field(default=None, alias="RESULT_FIELD_ID")
     result_files_field_id: Optional[int] = Field(default=None, alias="RESULT_FILES_FIELD_ID")
     # Custom fields for guest assignment

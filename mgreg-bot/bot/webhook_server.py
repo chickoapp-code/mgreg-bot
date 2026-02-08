@@ -475,18 +475,25 @@ async def handle_task_created(data: Dict[str, Any]) -> None:
     # Extract budget (field 130) for invitation text
     reward_amount = None
     try:
-        cf_data = task_details.get("customFieldData") or task_details.get("customfielddata") or []
+        # Planfix API may return customFieldData, customfielddata, or customfields
+        cf_data = (
+            task_details.get("customFieldData")
+            or task_details.get("customfielddata")
+            or task_details.get("customfields")
+            or []
+        )
         if settings.budget_field_id:
             for item in cf_data:
                 if not isinstance(item, dict):
                     continue
+                # Support {field: {id: 130}, value: X}, {field: 130, value: X}, {id: 130, value: X}
                 field = item.get("field") or item.get("fieldId")
-                fid = field.get("id") if isinstance(field, dict) else field
-                if fid == settings.budget_field_id:
+                fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
+                if fid is not None and int(fid) == settings.budget_field_id:
                     reward_amount = item.get("value")
                     break
-    except NameError:
-        pass  # task_details not available (Planfix fetch failed)
+    except (NameError, TypeError, ValueError):
+        pass  # task_details not available or extraction failed
 
     # Send invitations (using task_id for internal reference)
     await send_invitations(task_id_db, invited_guests, restaurant_name, restaurant_address, visit_date, reward_amount=reward_amount)
@@ -903,13 +910,19 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
 
     elif status_id == settings.status_payment_notification_id and settings.payment_amount_field_id:
         amount = None
-        cf_data = task.get("customFieldData") or task.get("customfielddata") or []
+        # Planfix API may return customFieldData, customfielddata, or customfields
+        cf_data = (
+            task.get("customFieldData")
+            or task.get("customfielddata")
+            or task.get("customfields")
+            or []
+        )
         for item in cf_data:
             if not isinstance(item, dict):
                 continue
             field = item.get("field") or item.get("fieldId")
-            fid = field.get("id") if isinstance(field, dict) else field
-            if fid == settings.payment_amount_field_id:
+            fid = field.get("id") if isinstance(field, dict) else (field if field is not None else item.get("id"))
+            if fid is not None and int(fid) == settings.payment_amount_field_id:
                 amount = item.get("value", "")
                 break
         amount_str = str(amount) if amount is not None else "—"
