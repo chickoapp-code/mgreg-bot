@@ -40,6 +40,8 @@ class Settings(BaseSettings):
     score_field_id: Optional[int] = Field(default=None, alias="SCORE_FIELD_ID")
     result_status_field_id: Optional[int] = Field(default=None, alias="RESULT_STATUS_FIELD_ID")
     session_id_field_id: Optional[int] = Field(default=None, alias="SESSION_ID_FIELD_ID")
+    sync_status_field_id: Optional[int] = Field(default=None, alias="SYNC_STATUS_FIELD_ID")
+    integration_comment_field_id: Optional[int] = Field(default=None, alias="INTEGRATION_COMMENT_FIELD_ID")
 
     # Server configuration
     webhook_host: str = Field(default="0.0.0.0", alias="WEBHOOK_HOST")

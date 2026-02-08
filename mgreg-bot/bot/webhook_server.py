@@ -1171,15 +1171,25 @@ async def handle_form_submission(
 
     # Update Planfix task
     custom_field_data = []
+    result_text = f"Оценка: {score}\n{summary}" if score else summary
     if settings.result_field_id:
-        result_text = f"Оценка: {score}\n{summary}" if score else summary
+        # 136 - Результат прохождения
         custom_field_data.append({"field": {"id": settings.result_field_id}, "value": result_text})
     if settings.score_field_id and score:
+        # 138 - Итоговый балл
         custom_field_data.append({"field": {"id": settings.score_field_id}, "value": str(score)})
     if settings.result_status_field_id:
         custom_field_data.append({"field": {"id": settings.result_status_field_id}, "value": "Завершено"})
     if settings.session_id_field_id:
         custom_field_data.append({"field": {"id": settings.session_id_field_id}, "value": session_id})
+    # 144 - Последний статус синхронизации с ботом
+    sync_status = f"Анкета получена {datetime.now().strftime('%d.%m.%Y %H:%M')}"
+    if settings.sync_status_field_id:
+        custom_field_data.append({"field": {"id": settings.sync_status_field_id}, "value": sync_status})
+    # 146 - Технический комментарий интеграции
+    tech_comment = f"session_id={session_id}; form={form}; guest_id={guest_id}; score={score}; task_id={task_id}"
+    if settings.integration_comment_field_id:
+        custom_field_data.append({"field": {"id": settings.integration_comment_field_id}, "value": tech_comment})
 
     # Get nomber from database for API calls
     task_nomber = await get_task_nomber_from_db(task_id)
