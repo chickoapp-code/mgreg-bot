@@ -814,6 +814,29 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
                         "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
                         (assigned_id,),
                     )
+        # Fallback: try Planfix API assignees (e.g. contact:427) when tasks.assigned_guest_id is null.
+        if not mapping and planfix_client:
+            try:
+                task_nomber = await get_task_nomber_for_api(task_id, data)
+                task = await planfix_client.get_task(task_nomber, fields="assignees")
+                assignees = task.get("assignees", {})
+                users = assignees.get("users", []) if isinstance(assignees, dict) else (assignees if isinstance(assignees, list) else [])
+                for u in users if users else []:
+                    uid = (u.get("id") or u.get("userId")) if isinstance(u, dict) else None
+                    if not uid:
+                        continue
+                    s = str(uid)
+                    cid = int(s.split(":")[-1]) if ":" in s else _parse_int(s)
+                    if cid:
+                        mapping = await db.fetch_one(
+                            "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                            (cid,),
+                        )
+                        if mapping:
+                            guest_id = cid
+                            break
+            except (PlanfixError, Exception):
+                pass
         if mapping:
             amount = None
             if isinstance(finance, dict):
@@ -1026,6 +1049,7 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
         (guest_planfix_id,),
     )
     # Planfix may send different guest ID (e.g. 5189802) than assigned_guest_id (e.g. 427). Try assigned_guest_id from tasks.
+    task_row = None
     if not mapping:
         task_id_from_webhook = task_obj.get("id") or data.get("taskId")
         task_id_int = _parse_int(task_id_from_webhook) if task_id_from_webhook else None
@@ -1042,6 +1066,31 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
             if mapping:
                 logger.info("planfix_task_updated_guest_fallback", webhook_guest_id=guest_planfix_id, assigned_guest_id=assigned_id)
                 guest_planfix_id = assigned_id
+
+    # Fallback: assigned_guest_id in tasks is null. Try Planfix API assignees (e.g. contact:427).
+    if not mapping and planfix_client:
+        try:
+            task = await planfix_client.get_task(task_nomber, fields="assignees")
+            assignees = task.get("assignees", {})
+            users = assignees.get("users", []) if isinstance(assignees, dict) else (assignees if isinstance(assignees, list) else [])
+            for u in users if users else []:
+                uid = (u.get("id") or u.get("userId")) if isinstance(u, dict) else None
+                if not uid:
+                    continue
+                s = str(uid)
+                cid = int(s.split(":")[-1]) if ":" in s else _parse_int(s)
+                if cid:
+                    mapping = await db.fetch_one(
+                        "SELECT telegram_id FROM guest_telegram_map WHERE planfix_contact_id = ?",
+                        (cid,),
+                    )
+                    if mapping:
+                        logger.info("planfix_task_updated_guest_from_api", webhook_guest_id=guest_planfix_id, api_contact_id=cid)
+                        guest_planfix_id = cid
+                        break
+        except PlanfixError as e:
+            logger.warning("planfix_task_updated_api_fallback_failed", task_nomber=task_nomber, error=str(e))
+
     if not mapping:
         logger.warning(
             "planfix_task_updated_guest_not_in_bot",
