@@ -925,7 +925,7 @@ def _parse_int(v: Any) -> int | None:
 async def handle_task_updated(data: Dict[str, Any]) -> None:
     """Handle task.updated / task.update event.
 
-    When status is 116: send to guest "Ваши ответы на проверке".
+    When status is 116 (На проверке): send to guest "Ваша анкета на проверке".
     When status is 117: send to guest notification about payment amount from finance.budget/actual or field 132.
     Prefers webhook data (task.statusId, guest.planfixContactId, finance.budget/actual) over API fetch.
     """
@@ -1006,7 +1006,7 @@ async def handle_task_updated(data: Dict[str, Any]) -> None:
 
     if status_id == settings.status_answers_review_id:
         try:
-            await bot_instance.send_message(telegram_id, "Ваши ответы на проверке.")
+            await bot_instance.send_message(telegram_id, "Ваша анкета на проверке.")
             logger.info("guest_notified_answers_review", task_nomber=task_nomber, guest_id=guest_planfix_id)
         except Exception as e:
             logger.error("guest_notify_answers_review_failed", telegram_id=telegram_id, error=str(e))
