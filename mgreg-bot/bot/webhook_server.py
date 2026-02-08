@@ -757,21 +757,36 @@ async def handle_task_completed_compensation(data: Dict[str, Any]) -> None:
             logger.error("admin_completion_notification_failed", error=str(e))
 
 
+def _extract_deadline_str(value: Any) -> str:
+    """Extract deadline string from webhook payload.
+
+    Planfix may send deadline as:
+    - str: "15-02-2026"
+    - dict: {"new": "15-02-2026"} or {"new": ""}
+    """
+    if isinstance(value, str):
+        return value
+    if isinstance(value, dict):
+        return str(value.get("new", value.get("date", "")) or "")
+    return ""
+
+
 async def handle_task_deadline_updated(data: Dict[str, Any]) -> None:
     """Handle task.deadline_updated event - deadline changed.
-    
+
     Note: Planfix automation has already updated deadline in Planfix.
     Bot should only update local database and reschedule deadline check.
     """
     task_id = data.get("taskId") or data.get("task", {}).get("id")
     # Support deadline from visit.deadline (Planfix format) or direct deadline
     visit = data.get("visit", {})
-    deadline = visit.get("deadline") if isinstance(visit, dict) else None
-    if not deadline:
-        deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
-    
+    raw_deadline = visit.get("deadline") if isinstance(visit, dict) else None
+    if raw_deadline is None:
+        raw_deadline = data.get("deadline") or data.get("task", {}).get("deadline", "")
+    deadline = _extract_deadline_str(raw_deadline)
+
     logger.info("planfix_task_deadline_updated", task_id=task_id, deadline=deadline)
-    
+
     # Update database
     # Note: Planfix automation has already updated deadline in Planfix
     db = get_database()
